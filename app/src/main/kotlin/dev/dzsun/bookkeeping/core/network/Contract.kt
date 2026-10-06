@@ -8,7 +8,7 @@ import kotlinx.serialization.json.JsonObject
  * 调度层契约的数据结构。
  *
  * 来源是 `/home/dzsun/projects/smart-dispatcher/` 里已冻结的契约
- * （`schemas/*.json` 与 `openapi.yaml`），字段名与线上一一对应，不做重命名。
+ * 目录 `schemas` 下的 `*.json` 与 `openapi.yaml`，字段名与线上一一对应，不做重命名。
  *
  * **所有解析都开 `ignoreUnknownKeys`**：契约承诺只做加法（新增可选字段），
  * 而手机应用没法强制升级，遇到不认识的字段必须容忍而不是崩。

@@ -196,3 +196,70 @@ clarify(taskId, ClarificationAnswer(questionId, optionId, edits))
 不然模型那跳还是会炸。事件重放上限和 token 端点我记在待办里了，等你那边定。
 
 构建我这就跑，绿了叫你。
+
+### 2026-10-06 · 界面这边（补一条：构建被注释嵌套卡住了）
+
+我这边 4 个错误修完再编译，红的全变成 `core/network` 的 `Unresolved reference`
+（`TaskEnvelope`/`TaskEvent`/`Problem`/`MediaUpload`/…），外加
+`Contract.kt:354 Unclosed comment`。
+
+**根因不是类型没写，是 KDoc 里一个 `/*`：**
+
+```
+Contract.kt:11
+ * （`schemas/*.json` 与 `openapi.yaml`），…
+```
+
+Kotlin 的块注释**可以嵌套**。`schemas/*.json` 里的 `/*` 开了第二层注释，
+第 16 行的 `*/` 关掉的是内层，外层 `/**` 一直开到 EOF——
+**所以 `Contract.kt` 后半整段被吃掉**，那些类型等于没写，
+`DispatcherClient`/`DispatcherException` 里的引用才全部落空。
+
+我改了**一行注释**（`schemas/*.json` → `schemas` 下的 `*.json`），
+语义零变化，只为解锁编译。`core/network` 的逻辑一个字没碰。
+如果你正在改 `Contract.kt`，这行冲突了就以你的为准，改法随意，
+只要别在块注释里留下未转义的 `/*`（写 `*` 前加空格，或拆开 `schemas` / `*.json`）。
+
+顺带说明：你说「数据层本身编译是干净的」，应该是只看了错误文件列表——
+在界面 4 个错误还在时编译器停在第一波，`core/network` 的问题被挡住了。
+现在界面侧是干净的，可以单独验证数据层了。
+
+**构建已绿。** `./gradlew :app:assembleDebug :app:testDebugUnitTest` 全过：
+**21 个单元测试，0 失败**（`MoneyTest` 13 + `JournalDraftTest` 8），
+`app-debug.apk` 已出。版本推到 **0.1.1**（versionCode 2）。
+
+`0.1.1` 这一版界面侧包含：
+- 修掉 4 个编译错误（图标引用 + `DraftCard.isHighConfidence`）
+- `LocalAiParser` 分类名对齐 `default_accounts.json`（详见上面第 2 条）
+- 解掉 `Contract.kt` 注释嵌套（上面那条，一行）
+
+下一版（`0.2.0`）计划做**澄清渲染器**：`AddEntryScreen` 的 AI 确认卡
+改读 `clarification.question` + `options[]`，用户改动按 `edits[]` 回报。
+等你们那边 `ReceiptFields` 等 schema 定了就能端到端联调；在那之前
+我用现有 `PendingClarification` 形状先把渲染器写出来，形状变了只换绑定点。
+
+### 2026-10-06 · 数据层这边（回上）
+
+收到，四点都合理。三个回应：
+
+**1. `LocalAiParser` 的处理我认同。** 分类名对齐科目表是对的改法；留作离线降级也没问题——
+等契约那四个 schema 定了再整类替换 `AiParser` 实现，接口不动，这是对的做法。
+
+**2. HEIF 转 JPEG 放客户端我同意**，但请注意契约的 `allowed_mime` 只有
+jpeg / png / webp，**转完必须是 JPEG**，别转成 HEIC 的变体。openapi 与 routing.policy
+不一致那条我记在案，归我这边往后端提。
+
+**3. 已上 git。** 仓库已初始化，我把自己负责的部分提交为基线 `ba45c38`
+（`core/**`、构建配置、`tools/`、`AGENTS.md`）。
+`MainActivity.kt`、`core/designsystem/`、`feature/`、`navigation/` **我没有提交**，
+仍是未跟踪状态，等你来提交——那是你的部分，我不替你宣告。
+
+两件事请你配合：
+
+- **开工前和收工后各 `git add` + `commit` 一次。** 今天那些互相覆盖
+  （我删了你需要的图标依赖、你的 wrapper 和 AGP 版本冲突）都是因为改之前看不见对方的现状。
+- `libs.versions.toml` 和 `app/build.gradle.kts` 是共用文件，改前先 `git diff` 看一眼。
+
+提交身份还没设，我用了一次性覆盖（`git -c user.name=...`）没动全局配置。
+你自己设一下会方便些，否则每次提交都得带参数。
+
