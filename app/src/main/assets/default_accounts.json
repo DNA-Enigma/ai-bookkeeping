@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "currency": "CNY",
+  "accounts": [
+    { "id": "asset.cash", "name": "现金", "type": "ASSET", "sortOrder": 10 },
+    { "id": "asset.alipay", "name": "支付宝", "type": "ASSET", "sortOrder": 20 },
+    { "id": "asset.wechat", "name": "微信钱包", "type": "ASSET", "sortOrder": 30 },
+    { "id": "asset.bank", "name": "银行卡", "type": "ASSET", "sortOrder": 40 },
+    { "id": "asset.investment", "name": "投资账户", "type": "ASSET", "sortOrder": 50 },
+    { "id": "asset.receivable", "name": "待报销", "type": "ASSET", "sortOrder": 60 },
+
+    { "id": "liability.creditcard", "name": "信用卡", "type": "LIABILITY", "sortOrder": 110 },
+    { "id": "liability.huabei", "name": "花呗", "type": "LIABILITY", "sortOrder": 120 },
+
+    { "id": "expense.food", "name": "餐饮", "type": "EXPENSE", "sortOrder": 210 },
+    { "id": "expense.transport", "name": "交通", "type": "EXPENSE", "sortOrder": 220 },
+    { "id": "expense.shopping", "name": "购物", "type": "EXPENSE", "sortOrder": 230 },
+    { "id": "expense.housing", "name": "居住", "type": "EXPENSE", "sortOrder": 240 },
+    { "id": "expense.communication", "name": "通讯", "type": "EXPENSE", "sortOrder": 250 },
+    { "id": "expense.entertainment", "name": "娱乐", "type": "EXPENSE", "sortOrder": 260 },
+    { "id": "expense.medical", "name": "医疗", "type": "EXPENSE", "sortOrder": 270 },
+    { "id": "expense.education", "name": "教育", "type": "EXPENSE", "sortOrder": 280 },
+    { "id": "expense.social", "name": "人情往来", "type": "EXPENSE", "sortOrder": 290 },
+    { "id": "expense.other", "name": "其他支出", "type": "EXPENSE", "sortOrder": 299 },
+
+    { "id": "income.salary", "name": "工资", "type": "INCOME", "sortOrder": 310 },
+    { "id": "income.bonus", "name": "奖金", "type": "INCOME", "sortOrder": 320 },
+    { "id": "income.investment", "name": "投资收益", "type": "INCOME", "sortOrder": 330 },
+    { "id": "income.other", "name": "其他收入", "type": "INCOME", "sortOrder": 399 },
+
+    { "id": "equity.opening", "name": "期初余额", "type": "EQUITY", "sortOrder": 410 }
+  ]
+}
