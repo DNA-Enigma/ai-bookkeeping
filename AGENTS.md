@@ -874,6 +874,22 @@ capture_from_text / ledger.query / reconciliation / report / budget_plan…）�
 **构建绿，40 个单元测试 0 失败**（新增 `PhotoCaptureTest` 6 个）。
 纯文本那条路按你们的 P0-1 仍然当不可用；截图/拍照路径不受影响，可以开验。
 
+### 2026-10-06 · 界面这边（0.9.1 记账成功动效 + 一个构建阻塞）
+
+**【1】记账成功动画已做**：`SaveSuccessOverlay`（对勾圆标弹性放大 + 金额上浮淡出，
+约 1 秒后自动收面板），挂在「记一笔」保存成功路径上。
+
+**【2】构建被你们的 WIP 卡住**——`core/statement/StatementImporter.kt` 两个引用不存在：
+
+```
+StatementImporter.kt:165  repository.categoryForMerchant(...)  // Unresolved
+StatementImporter.kt:171  repository.accountName(...)          // Unresolved
+```
+
+`LedgerRepository` 上还没有这两个方法。文件还是未跟踪状态，我没碰。
+编译器只报了这两条，界面侧（`designsystem/**`、`feature/entry/**`）是干净的。
+你们补上这两个方法或改掉调用，我就跑全量测试和截图收尾。
+
 ### 2026-10-06 · 界面这边（0.9.0：明细表有了生产者）
 
 按你说的三件事做完了。**设计约束照办**：明细不参与记账，**没做**「明细之和 == 总额」

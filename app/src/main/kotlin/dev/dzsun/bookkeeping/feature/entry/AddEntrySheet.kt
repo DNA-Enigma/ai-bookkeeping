@@ -145,9 +145,11 @@ fun AddEntrySheet(
     }
 
     if (state.saved) {
-        androidx.compose.runtime.LaunchedEffect(state.saved) {
-            onSaved()
-        }
+        // 全屏成功动效，播完自动收起
+        dev.dzsun.bookkeeping.core.designsystem.SaveSuccessOverlay(
+            amountLabel = "¥" + state.amountText.ifBlank { "0" },
+            onFinished = onSaved,
+        )
     }
 }
 
