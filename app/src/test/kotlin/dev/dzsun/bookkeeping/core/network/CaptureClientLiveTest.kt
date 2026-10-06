@@ -38,38 +38,16 @@ class CaptureClientLiveTest {
         return CaptureClient(DispatcherClient(config), config, UuidGenerator())
     }
 
-    private companion object {
-        const val EMPTY_PLAN_RETRIES = 3
-    }
-
     private fun assumeLive() {
         assumeTrue("未设 DISPATCHER_LIVE=1，跳过联调", System.getenv("DISPATCHER_LIVE") == "1")
-    }
-
-    /**
-     * 服务端的拆解器有个**间歇性**的 P0：偶尔会「strategy=single_step 但节点数为 0」，
-     * 直接 422（见 `docs/dispatcher-issues.md` 的 P0-1c）。它发生在任务创建**之前**，
-     * 不是客户端闭环的问题，所以这里重试几次——但重试都失败就照样红，
-     * 免得把一个持续存在的故障伪装成"偶发"。
-     */
-    private suspend fun captureRetryingOnEmptyPlan(request: CaptureRequest): CaptureOutcome {
-        var last: DispatcherException? = null
-        repeat(EMPTY_PLAN_RETRIES) {
-            try {
-                return liveCaptureClient().capture(request)
-            } catch (e: DispatcherException) {
-                if (e.code != Problem.CODE_POLICY_VIOLATION) throw e
-                last = e
-            }
-        }
-        throw AssertionError("连续 $EMPTY_PLAN_RETRIES 次都被拆解器拒绝（P0-1c 仍在）：${last?.message}")
     }
 
     @Test
     fun `纯文本记账走完提交到终局`() = runBlocking {
         assumeLive()
 
-        val outcome = captureRetryingOnEmptyPlan(
+        // 直路：不再为重试 P0-1c 留后门。那条路修好了，它要是再坏，这条就该红
+        val outcome = liveCaptureClient().capture(
             CaptureRequest(intent = "bookkeeping.capture_from_text", text = "午饭花了38"),
         )
 
@@ -122,7 +100,7 @@ class CaptureClientLiveTest {
         val image = File(path!!)
         assumeTrue("收据图片不存在：$path", image.isFile)
 
-        val outcome = captureRetryingOnEmptyPlan(
+        val outcome = liveCaptureClient().capture(
             CaptureRequest(
                 intent = "bookkeeping.capture_from_receipt",
                 media = MediaPayload(image.readBytes(), "image/png", MediaRole.SCREENSHOT),

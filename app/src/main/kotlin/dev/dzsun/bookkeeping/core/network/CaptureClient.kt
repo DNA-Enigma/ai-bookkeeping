@@ -50,12 +50,11 @@ class CaptureClient @Inject constructor(
                 input = TaskInput(text = request.text, media = mediaRef?.let { listOf(it) }),
                 declared = Declared(
                     intent = request.intent,
-                    // ⚠️ 临时绕行，修好后应切回 true。理由与复现见
-                    // docs/dispatcher-issues.md 的 P0-1c：把 authoritative 置 true 后
-                    // 服务端会走另一套拆解，实测跑到 `record_expense` 模板时节点输入引用
-                    // 解析不了（`envelope.user_text` 断了）而整单失败；false 时路由到
-                    // single_tool_action / vision_extract_then_write，两条都跑得通。
-                    authoritative = false,
+                    // 契约管这叫「唯一的合法快捷路径」：界面知道用户点的是「记一笔」，
+                    // 就显式声明，省掉一次评估。曾经因为 P0-1c（置 true 会让服务端拆出
+                    // 空计划或绑到坏模板而整单失败）临时置过 false，dispatcher 修完后
+                    // 已切回——见 docs/dispatcher-issues.md。
+                    authoritative = true,
                 ),
                 constraints = Constraints(dataSensitivity = Constraints.SENSITIVITY_FINANCIAL),
                 client = ClientInfo(
