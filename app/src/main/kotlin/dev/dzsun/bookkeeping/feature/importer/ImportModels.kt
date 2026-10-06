@@ -59,6 +59,9 @@ fun ImportPlan.toSummary(currency: String): ImportSummary {
                 incomeCount++
                 incomeMinor += e.row.amount.amountMinor
             }
+            // 不计收支的行（充值/提现/还款）在解析阶段就判成 NotConsumption，
+            // 进不了 entries，所以这里到不了。见 core/statement/StatementRowParser.kt
+            StatementDirection.NEUTRAL -> Unit
         }
     }
     return ImportSummary(
