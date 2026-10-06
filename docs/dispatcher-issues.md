@@ -188,6 +188,33 @@ config/routing.policy.yaml:300:  node_defaults:                        # 仅配�
 `Merchant` 仍未拿到（`normalize` 那步还没跑通过）。
 **建议补上这四个 schema**，消费端已经照实测形状写了映射，形状一冻结才好对齐。
 
+### ⚠️ `ReceiptFields` 缺明细行——这会让「帮用户记住买了什么」做不成
+
+实测抽出来的字段是：
+
+```jsonc
+{ "amount": 38.5, "currency": "CNY", "merchant": "星巴克咖啡（国贸店）",
+  "datetime": "2026-10-06 14:32:07", "payment_method": null,
+  "direction": "expense", "confidence": 0.98, "notes": "整图抽取得到完整字段…" }
+```
+
+而那张小票上明明白白写着**「商品说明：拿铁 大杯」**——**它没有被抽出来**。
+`notes` 是模型的自我说明，不是明细。
+
+**为什么这条要紧**：金额、商户、分类都不足以让人几周后想起一笔支出；
+「拿铁 大杯」才是。而**抽取的时候这行字本来就在图里**，抽出来几乎零成本。
+消费端已经建好了放明细的表（`journal_item`），但**没有生产者**。
+
+**建议**：`bookkeeping.ReceiptFields` 增加一个明细数组，形如：
+
+```jsonc
+"items": [ { "description": "拿铁 大杯", "amount": 34.00 } ]
+```
+
+同时改 `prompts/agents/receipt_extractor.md`，要求它输出小票上的商品行。
+注意明细金额**不要求与总额相等**——折扣、税、抹零会让两者不等，
+强行对齐反而会造出错账（消费端就是这么设计的：明细只做描述，不参与记账）。
+
 ---
 
 ## P1-4b　`clarify` 与 `feedback` 的 `edits` 同名不同形，且 clarify 端点没有校验
