@@ -34,6 +34,8 @@ android {
 
     buildFeatures {
         compose = true
+        // CaptureClient 把版本号报给调度层，用 BuildConfig 保证与构建一致
+        buildConfig = true
     }
 
     packaging {

@@ -31,8 +31,14 @@ class DispatcherConfig @Inject constructor() {
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
     companion object {
-        /** 安卓模拟器用 10.0.2.2 访问宿主机的 localhost。 */
-        const val DEFAULT_BASE_URL = "http://10.0.2.2:8000"
+        /**
+         * 安卓模拟器用 10.0.2.2 访问宿主机的 localhost；8010 是本地跑调度层的端口
+         * （8000 上常被别的服务占着）。
+         *
+         * **真机上这个地址无效**（10.0.2.2 只是模拟器的别名），必须在设置页改成
+         * 局域网地址。设置页读写的就是这个字段。
+         */
+        const val DEFAULT_BASE_URL = "http://10.0.2.2:8010"
 
         /** 当前是「自己和少数朋友」用，账号隔离最简即可。 */
         const val DEFAULT_USER_ID = "local"

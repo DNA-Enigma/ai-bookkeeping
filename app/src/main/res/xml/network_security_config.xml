@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  正式构建：禁止明文 HTTP。
+  调度层目前是自托管的 HTTP 服务，见 src/debug 下的同名文件——
+  那里才对开发地址放行。给调度层配上 TLS 之后，debug 那份也可以删掉。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

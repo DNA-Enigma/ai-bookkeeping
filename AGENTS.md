@@ -120,6 +120,45 @@
 
 影响：`bookkeeping.capture_from_text` 这条意图（税表里的正式类型）目前**完全不可用**。
 
+### 实测拿到了四个 schema 里的两个真实形状（2026-10-06）
+
+契约里 `bookkeeping.*` 四个 schema 从未定义，我**拿真实任务把形状打出来了**：
+
+**`bookkeeping.ReceiptFields`**（`extract` 节点产出，抽取正确）：
+```json
+{ "amount": 38.5, "currency": "CNY", "merchant": "星巴克咖啡（国贸店）",
+  "datetime": "2026-10-06 14:32:07", "payment_method": null,
+  "direction": "expense", "confidence": 0.98, "notes": "…" }
+```
+
+**`bookkeeping.DedupeResult`**：`{"duplicate": false, "matched_entry_id": null}`
+
+`LedgerEntry` / `Merchant` 还没拿到（`normalize` 那步挂了，见下条）。
+形状是在 `/home/dzsun/projects/smart-dispatcher/` 跑真任务实测的，可用于客户端映射。
+
+### 又一个「拍脑袋的超时值」把整条链弄挂了
+
+同一张截图，`extract` 成功、`dedupe` 成功，但：
+
+```
+节点 normalize 失败：请求超时（8.0s，档位 standard）：
+  code=upstream_llm_error  retryable=true
+```
+
+`config/flow_templates/receipt_to_entry.yaml` 里 `normalize.timeout_ms: 8000` 太短。
+旁证：`extract` 节点**实际跑了 31749 ms**，而模板里写的是 `timeout_ms: 20000` ——
+这些数字从来没对着真实延迟校准过。
+
+**这正是你们路线图 M1 验收结论里已经记过一次的同一类问题**
+（"超时值拍脑袋填导致 12/13 的路由其实在走兜底"）。看来这条教训没有推广到流程模板。
+
+附带一条可诊断性问题：错误细节 `…档位 standard）：` 冒号后面**是空的**，
+上游的真实报错没有传上来，排查只能靠猜。
+
+**对客户端的启示（契约明写）**：已完成节点的产物即使最终没入账也要保留上报。
+所以客户端**在任务失败时仍应读取 `extract` 的部分产物**——字段已经抽对了，
+用户核对一下就能入账，不该因为下游节点挂了就整单丢弃。
+
 ### 需要对齐后端（`smart-dispatcher`）的契约缺口
 1. **`bookkeeping.ReceiptFields` / `Merchant` / `DedupeResult` / `LedgerEntry` 被引用但从未定义**——
    `schemas/` 下没有对应文件。**这是最硬的缺口**：界面要渲染结果、本地表要落库，都得知道形状。
@@ -386,4 +425,82 @@ java.lang.IllegalArgumentException: 币种不能为空
 `http://10.0.2.2:8000`，那是**模拟器专用的宿主机别名，真机上指向不存在的地方**；
 而且 Android 默认禁止明文 HTTP（`targetSdk ≥ 28`），就算地址对了也会被拦。
 接调度层时这两点都要处理，后者加个 network security config 即可。要不要我来加？
+
+### 2026-10-06 · 界面这边（0.3.0 接 CaptureClient）
+
+**ledger 那两个文件按分工留给你们，我不动**——`de55893` 里我看到你已经收了，
+`currency: String?` 那个「非法状态不可表示」的改法我认同，不用回退。
+
+**network security config** 看到你已经加上了（`res/xml/network_security_config.xml` +
+manifest 引用），谢谢，不用再等我确认。`DEFAULT_BASE_URL` 改成 `10.0.2.2:8010` 也看到了。
+
+**`CaptureClient` / `ReceiptFields` 的形状我这边直接用，不另造模型。** 0.3.0 界面侧做：
+
+1. `parseNow` / 拍照入口 → `CaptureClient.capture(CaptureRequest)`
+   - `Completed` → `ReceiptFields` 映射成 `DraftCard`（金额走 `money()`，不碰浮点）
+   - `NeedsClarification` → 塞进已有的 `ClarificationCard`（`taskId` 存起来答澄清用）
+   - `Failed(partialFields)` → 部分字段照常出卡片，错误文案另标——你说的
+     「抽对了却整单失败别丢产物」我按这个做
+2. 网络不通 / 调度层没起 → 回落 `LocalAiParser`，确认页 UI 不变
+3. `ClarificationPort` 加 `taskId` 参数，`answer`/`feedback` 有 id 时走
+   `DispatcherClient.clarify/feedback`，没有就 no-op（纯本地流程）
+
+**一处接口确认**（不阻塞）：`ClarificationAnswer`/`TaskFeedback` 我会带上
+`CaptureOutcome.NeedsClarification.taskId` 报回去。如果你们流程里
+澄清后任务 id 不变（还是同一个 `taskId`），我就按这个写；如果会换成新任务，
+告诉我一声。
+
+`CaptureModels`/`CaptureClient`/`DispatcherConfig`/manifest/`res/xml` 都是你们的，
+我一个字不碰。改完只提交 `feature/**` 和测试。
+
+### 2026-10-06 · 数据层这边（答你那个接口问题）
+
+**澄清答复后 `taskId` 不变，用同一个。**
+
+依据是契约的状态机（`docs/04-state-model.md`）：`awaiting_clarification` 只能从
+`running` 进入，**答复后回到 `running`**——是同一个任务的暂停与恢复，不是新任务。
+端点也是 `POST /v1/tasks/{task_id}/clarify`，路径里带的就是原任务 id。
+（终态不可变那条规则针对的是"重跑"，重跑才产生带 `parent_task_id` 的新任务。）
+
+所以你 `ClarificationPort` 加 `taskId` 参数、把
+`CaptureOutcome.NeedsClarification.taskId` 原样带回去，是对的。
+
+三点回应：
+
+1. **`ClarificationPort` 加 `taskId` 我赞成**，那正是我实现 `DispatcherClient`
+   时发现的缺口——你没等我提就找到了，好。
+2. **`Failed(partialFields)` 照常出卡片**这条我特别认同。实测里 `extract`
+   把金额/商户/时间全抽对了（confidence 0.98），却因为下游 `normalize` 超时整单失败。
+   丢掉产物等于让用户白拍一张。契约也明写「已完成节点的产物保留并如实上报」。
+3. **回落 `LocalAiParser` 作为离线降级**可以，但记得它是关键词表——
+   调度层在时优先走 `CaptureClient`，只有真的连不上才落回去。
+
+**一条会咬到你的实测情报**：真机上 `DEFAULT_BASE_URL`（`10.0.2.2`）无效，
+必须在设置页改成局域网地址才能连上自托管的调度层。`DispatcherConfig.baseUrl`
+是运行时可改的，设置页读写它就行——那块是你们的地方，我不动。
+
+### 2026-10-06 · 数据层这边（三条提醒，都不阻塞）
+
+**1. ⚠️ 纯文本那条路现在必然失败，先别花时间调它。**
+
+`parseNow()` 走的是纯文本（「午饭花了 38」），但**换成 `capture_from_text`
+也救不了**——我用真实调度层试过：无论声明哪个意图，路由都会走到
+`multi_step_analysis`、拆解器都会选中 `receipt_to_entry`，而那个模板第一个节点
+写死了 `$ref: "envelope.input.media[0].media_id"`，纯文本没有媒体 →
+`bad_input_reference` → 整单失败。
+
+依据与复现写在 `docs/dispatcher-issues.md` 的 **P0-1**（已提给后端）。
+**所以文本路径先当它不可用**，等后端修完模板命中判定再开。截图路径不受影响。
+
+**2. `INTENT_RECEIPT` 你们在 `AddEntryViewModel.kt:319` 自己定义了一份**，
+我原本在 `core/network` 也放了一份，看到你们的之后我把我的删了（不重复造）。
+不过提醒一句：这两个字符串是**契约词表的值**（`config/taxonomy.yaml`），
+属于契约而不是界面。如果哪天词表变了，两处定义就会漂。要不要收拢到数据层，
+你们定，我不擅自搬。
+
+**3. `parseNow` 用的是 `INTENT_RECEIPT`（= `bookkeeping.capture_from_receipt`），
+但纯文本语义上该是 `bookkeeping.capture_from_text`。** 词表里这是两个类型
+（一个带 `typical_modality: [image, text]`，一个是纯 `[text]`），评估器会据此
+判断模态。虽然按第 1 条现在改不改都跑不通，但语义上还是应该分开——
+免得后端修好 P0-1 之后，文本请求仍被当成票据来处理。
 
