@@ -30,7 +30,7 @@ class LedgerConverters {
         PostingEntity::class,
         JournalItemEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 @TypeConverters(LedgerConverters::class)
@@ -74,6 +74,22 @@ abstract class LedgerDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_journal_item_journalId " +
                         "ON journal_item(journalId)",
+                )
+            }
+        }
+
+        /**
+         * v2 → v3：冲减的溯源列（退款/撤销冲的是哪一笔）。
+         *
+         * 同样是加列而非改列，**不用破坏性迁移**——那会清空账本。
+         * 老账目的该列为 NULL，含义正是「不是冲减」，与旧数据相符。
+         */
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE journal ADD COLUMN reversesJournalId TEXT")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_journal_reversesJournalId " +
+                        "ON journal(reversesJournalId)",
                 )
             }
         }

@@ -116,6 +116,7 @@ internal class StatementRowParser(private val formats: List<StatementFormat>) {
             rawType = rawType,
             rawTime = rawTime,
             rowNumber = rowNumber,
+            isRefund = isRefund(status, rawType, format),
         )
 
         // 排除的三种理由，按「离钱最近」的顺序判：先看这笔有没有成交，
@@ -161,6 +162,25 @@ internal class StatementRowParser(private val formats: List<StatementFormat>) {
         if (type.isEmpty()) return null
         val hit = format.nonConsumptionTypes.firstOrNull { normalize(it).isNotEmpty() && type.contains(normalize(it)) }
         return hit?.let { "交易类型「$it」属于资金转移，不是消费" }
+    }
+
+    /**
+     * 这行说的是不是一笔退回来的钱。
+     *
+     * 只看**状态列**与**交易类型列**，且用配置里的词表。特别地**不看商品说明**：
+     * 那是自由文本，商品名里带「退款」二字的正常消费会中招，后果是静默少记一笔支出。
+     *
+     * 也**不看金额列的负号**——银行流水里普通借方同样常写成 `-38.50`，
+     * 靠符号判会把正常支出认成退款。
+     */
+    private fun isRefund(status: String?, rawType: String?, format: StatementFormat): Boolean {
+        if (format.refundMarkers.isEmpty()) return false
+        val markers = format.refundMarkers.filter { it.isNotBlank() }.map { normalize(it) }
+        if (markers.isEmpty()) return false
+        return listOfNotNull(status, rawType).any { value ->
+            val normalized = normalize(value)
+            markers.any { normalized.contains(it) }
+        }
     }
 
     // ------------------------------------------------------------ 字段解析

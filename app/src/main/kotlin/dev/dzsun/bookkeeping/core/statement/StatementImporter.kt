@@ -1,11 +1,14 @@
 package dev.dzsun.bookkeeping.core.statement
 
+import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.database.DuplicateCandidate
+import dev.dzsun.bookkeeping.core.database.JournalEntity
 import dev.dzsun.bookkeeping.core.database.JournalStatus
 import dev.dzsun.bookkeeping.core.database.JournalSource
 import dev.dzsun.bookkeeping.core.ledger.ItemDraft
 import dev.dzsun.bookkeeping.core.ledger.JournalDraft
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
+import dev.dzsun.bookkeeping.core.money.Money
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +66,37 @@ data class PlannedEntry(
 }
 
 /**
+ * 一笔**可以落库**的冲减。
+ *
+ * 这是 P1-d 补的形状：此前 `statusChanged` 里的退款行**只能看不能办**，
+ * 用户没有任何办法在导入流程里处理那笔冲减，只能自己去账本里手记一笔——
+ * 那正是导入想省掉的事。
+ *
+ * [draft] 是已经构造好的反向凭证（[JournalDraft.reversalOf] 的产物），
+ * 界面把它连同勾选状态一起传回 `commit` 即可，不必自己拼分录。
+ */
+data class PlannedReversal(
+    /** 触发它的那一行流水。 */
+    val row: StatementRow,
+    /**
+     * 冲的是账本里**已有的**哪一笔。
+     *
+     * null 表示原消费是**同一批一起导入**的（首次导入就带着退款状态），
+     * 它的凭证 id 要到落库时才产生，所以由 `commit` 在写完原消费后补上。
+     */
+    val existingJournalId: String?,
+    /** 反向凭证。部分退款时冲的是退回来的那部分，不是全额。 */
+    val draft: JournalDraft,
+    /** 退回来多少钱。**从流水里认出来的**，认不出来时不会有这条 [PlannedReversal]。 */
+    val refundAmount: Money,
+    /** 原消费的分类名，给预览显示用。 */
+    val categoryName: String,
+) {
+    /** 部分退款（平台状态里带了金额，比原消费少）。 */
+    val isPartial: Boolean get() = refundAmount < row.amount
+}
+
+/**
  * 一次导入的计划。**先给用户看，确认后才落库。**
  *
  * 导入动辄几百行，直接写进去出了错很难收拾；而预览里能顺手回答
@@ -80,6 +114,17 @@ data class ImportPlan(
     val alreadyImportedCount: Int,
     /** 之前导入过、但**状态变了**（多半是退款）的，得让用户看到。 */
     val statusChanged: List<StatementRow>,
+    /**
+     * 可以落库的退款冲减。**按行与上面几个列表重叠，不是新增的行数**——
+     * 原消费已在账本里的，那行同时也在 [statusChanged] 里；
+     * 首次导入就带退款状态的，那行同时也在 [entries] 里。
+     *
+     * 所以 [totalRows] **不**把它再数一遍。之所以让它重叠而不把它挪走，
+     * 是因为 `statusChanged` 若不再完整，现有的预览会**静默少显示几行**——
+     * 用户看不到的那一行，比看到一行还不能办更糟。
+     * 界面做勾选入口时按 `row.rowNumber` 与上面两个列表对上即可。
+     */
+    val reversals: List<PlannedReversal> = emptyList(),
     val excluded: List<RowVerdict.NotConsumption>,
     val unusable: List<RowVerdict.Unusable>,
 ) {
@@ -168,6 +213,7 @@ class StatementImporter @Inject constructor(
         val entries = mutableListOf<PlannedEntry>()
         val duplicates = mutableListOf<PlannedEntry>()
         val statusChanged = mutableListOf<StatementRow>()
+        val reversals = mutableListOf<PlannedReversal>()
         var alreadyImported = 0
 
         for (row in parsed.consumptionRows) {
@@ -180,11 +226,21 @@ class StatementImporter @Inject constructor(
                 } else {
                     alreadyImported++
                 }
+                // 状态变了得**能办**，不只是看着。原消费就在账本里，直接照着它反向记一笔。
+                planReversalOf(row, existing, format)?.let { reversals += it }
                 continue
             }
 
             val planned = planEntry(row, request)
-            if (planned.duplicateCandidates.isEmpty()) entries += planned else duplicates += planned
+            if (planned.duplicateCandidates.isEmpty()) {
+                entries += planned
+                // 首次导入就带着退款状态：原消费也在这一批里，冲减到落库时才连得上它。
+                // 只在原消费**确实会入库**时才提冲减——它要是疑似重复、默认不导入，
+                // 冲减就成了一笔无主的负向凭证
+                planReversalOfNewCharge(row, planned, format)?.let { reversals += it }
+            } else {
+                duplicates += planned
+            }
         }
 
         return ImportPreparation.Ready(
@@ -196,10 +252,95 @@ class StatementImporter @Inject constructor(
                 duplicates = duplicates,
                 alreadyImportedCount = alreadyImported,
                 statusChanged = statusChanged,
+                reversals = reversals,
                 excluded = parsed.verdicts.filterIsInstance<RowVerdict.NotConsumption>(),
                 unusable = parsed.verdicts.filterIsInstance<RowVerdict.Unusable>(),
             ),
         )
+    }
+
+    /**
+     * 原消费**已经在账本里**，这行说它被退回来了。
+     *
+     * 照着原凭证的分录反向记一笔——这是唯一能保证「退款把原消费恰好抵消」的做法：
+     * 账户与分类都取自原凭证，不重新猜一遍。若拿商户名重新归类，退款很可能落到
+     * 另一个分类上，于是那个分类的支出虚高、原分类虚低，两边都错。
+     *
+     * 三种情况不产出冲减，**都不猜**：原凭证本身已是一笔冲减（不套娃）、
+     * 这笔已经冲过了（不重复冲）、退款金额从流水里认不出来。
+     */
+    private suspend fun planReversalOf(
+        row: StatementRow,
+        existing: JournalEntity,
+        format: StatementFormat,
+    ): PlannedReversal? {
+        if (existing.reversesJournalId != null) return null
+        if (repository.isReversed(existing.id)) return null
+
+        // 读回原凭证。读不出来（库里的账坏了）就不冲——把坏账放大一倍更糟
+        val original = repository.draftOf(existing.id) ?: return null
+        val chargeAmount = original.postings.firstOrNull()?.amount?.abs() ?: return null
+
+        val refunded = RefundAmount.resolve(row.status, format, chargeAmount) ?: return null
+        // 部分退款只支持一收一支的凭证；拆分凭证要按比例摊分，规则未定
+        if (refunded < chargeAmount && original.postings.size != 2) return null
+
+        return PlannedReversal(
+            row = row,
+            existingJournalId = existing.id,
+            draft = JournalDraft.reversalOf(
+                original = original,
+                amount = refunded.takeIf { it < chargeAmount },
+                source = JournalSource.STATEMENT,
+                reversesJournalId = existing.id,
+            ),
+            refundAmount = refunded,
+            categoryName = categoryNameOf(original),
+        )
+    }
+
+    /**
+     * 这行是退款，但账本里还没有对应的原消费——**首次导入就带着退款状态**。
+     *
+     * 那笔原消费也在这一批里（同一行既说明花了多少、又说明退回来了），
+     * 所以冲减照它反向，落库时由 `commit` 把两者的 id 连起来。
+     *
+     * 只在**支出**方向做：方向写着收入的行，退款到底冲的是哪一笔账、
+     * 该落到哪个分类都无从判断，宁可不动它（照旧当一笔收入导入）。
+     */
+    private suspend fun planReversalOfNewCharge(
+        row: StatementRow,
+        charge: PlannedEntry,
+        format: StatementFormat,
+    ): PlannedReversal? {
+        if (row.direction != StatementDirection.EXPENSE) return null
+
+        val chargeDraft = toJournalDraft(charge)
+        val chargeAmount = row.amount
+        val refunded = RefundAmount.resolve(row.status, format, chargeAmount) ?: return null
+
+        return PlannedReversal(
+            row = row,
+            existingJournalId = null,
+            draft = JournalDraft.reversalOf(
+                original = chargeDraft,
+                amount = refunded.takeIf { it < chargeAmount },
+                source = JournalSource.STATEMENT,
+            ),
+            refundAmount = refunded,
+            categoryName = charge.categoryName,
+        )
+    }
+
+    /** 原凭证里那个收支分类账户的名字。冲减的分类就是它，不重新猜。 */
+    private suspend fun categoryNameOf(original: JournalDraft): String {
+        for (posting in original.postings) {
+            val account = repository.accountOf(posting.accountId) ?: continue
+            if (account.type == AccountType.EXPENSE || account.type == AccountType.INCOME) {
+                return account.name
+            }
+        }
+        return ""
     }
 
     private suspend fun planEntry(row: StatementRow, request: ImportRequest): PlannedEntry {
@@ -228,18 +369,52 @@ class StatementImporter @Inject constructor(
         )
     }
 
-    /** 把用户确认过的行落库。传进来的才写，其余一概不动。 */
-    suspend fun commit(entries: List<PlannedEntry>): ImportOutcome = withContext(Dispatchers.IO) {
+    /**
+     * 把用户确认过的行落库。传进来的才写，其余一概不动。
+     *
+     * [reversals] 是用户勾选了的退款冲减。顺序不能颠倒：**先写原消费，再写冲减**，
+     * 因为「首次导入就带着退款状态」那些行的冲减要拿原消费的凭证 id 才连得上。
+     * 冲减在原消费之前写的话，`reversesJournalId` 就是空的——一笔无主的负向凭证，
+     * 既说不清冲的是谁，也没法保证不重复冲。
+     */
+    suspend fun commit(
+        entries: List<PlannedEntry>,
+        reversals: List<PlannedReversal> = emptyList(),
+    ): ImportOutcome = withContext(Dispatchers.IO) {
         var imported = 0
         val failures = mutableListOf<String>()
+        val postedByKey = mutableMapOf<Pair<String, String>, String>()
+
         for (entry in entries) {
             runCatching { repository.post(toJournalDraft(entry)) }
-                .onSuccess { imported++ }
+                .onSuccess { id ->
+                    imported++
+                    postedByKey[entry.row.externalSource to entry.row.externalRef] = id
+                }
                 .onFailure { failures += "第 ${entry.row.rowNumber} 行入账失败：${it.message}" }
         }
+
+        for (reversal in reversals) {
+            val originalId = reversal.existingJournalId
+                ?: postedByKey[reversal.row.externalSource to reversal.row.externalRef]
+            if (originalId == null) {
+                failures += "第 ${reversal.row.rowNumber} 行的退款冲减失败：本次没有导入它所冲的那笔原消费"
+                continue
+            }
+            runCatching {
+                repository.postReversal(
+                    draft = reversal.draft.copy(reversesJournalId = originalId),
+                    // 冲减之后要把原凭证的平台状态推到最新，否则下次导入比对状态
+                    // 又会认为「变了」，于是再冲一次
+                    originalExternalStatus = reversal.row.status,
+                )
+            }
+                .onSuccess { imported++ }
+                .onFailure { failures += "第 ${reversal.row.rowNumber} 行的退款冲减失败：${it.message}" }
+        }
+
         ImportOutcome(imported, failures)
     }
-
 }
 
 /**

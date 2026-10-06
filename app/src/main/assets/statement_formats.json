@@ -1,7 +1,8 @@
 {
   "_comment": "流水文件的格式定义。加一家银行 = 加一条，不改代码。列名是配置性的：各家不同，且会随账单版本变。",
   "_verification": "✅ 列名、取值、编码均已用**真实导出账单**逐字核对（2026-10-06，支付宝 CSV 596 笔 / 微信 xlsx 86 笔）。改动前请照 docs/statement-formats-real.md 的结论；那份文档记了实测方法与四个坑。",
-  "version": 2,
+  "version": 3,
+  "_refund_note": "refund_markers/full_refund_markers 依据微信实测状态取值「已全额退款」「已退款¥6.60」。金额列的负号**不当作退款判据**——银行流水里普通借方也写成 -38.50。",
   "formats": [
     {
       "_note": "微信账单实测是 **xlsx**（不是加密 zip+csv），xlsx 与 csv 两种输入都能走这条定义——列名一样。",
@@ -30,6 +31,8 @@
         "零钱通", "理财通", "信用卡还款", "零钱提现", "充值"
       ],
       "skip_statuses": [],
+      "refund_markers": ["退款", "退货"],
+      "full_refund_markers": ["全额退款"],
       "time_patterns": ["yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss", "yyyy-MM-dd HH:mm"]
     },
     {
@@ -59,6 +62,8 @@
         "信用借还", "投资理财", "提现", "充值", "亲情卡"
       ],
       "skip_statuses": ["交易关闭"],
+      "refund_markers": ["退款", "退货"],
+      "full_refund_markers": ["全额退款"],
       "time_patterns": ["yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss", "yyyy-MM-dd HH:mm"]
     },
     {
@@ -84,6 +89,8 @@
       },
       "non_consumption_types": ["转账", "还款", "理财", "基金", "定期", "结息"],
       "skip_statuses": [],
+      "refund_markers": ["退款", "退货"],
+      "full_refund_markers": ["全额退款"],
       "time_patterns": [
         "yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss",
         "yyyyMMdd", "yyyy-MM-dd", "yyyy/MM/dd"

@@ -103,6 +103,8 @@ data class AccountEntity(
         // SQLite 的唯一索引把 NULL 当作互不相同，所以手记/拍票那些
         // externalRef 为 null 的行不受影响。
         Index(value = ["externalSource", "externalRef"], unique = true),
+        // 「这笔被冲减过没有」每次导入都要问一遍（冲减的幂等依据）
+        Index("reversesJournalId"),
     ],
 )
 data class JournalEntity(
@@ -144,6 +146,17 @@ data class JournalEntity(
      * 金额和商户都记不住的时候，地点还在。可为空。
      */
     val place: String? = null,
+
+    /**
+     * 这是一笔**冲减**（退款/撤销/冲正），冲的是哪一笔凭证。非空即冲减。
+     *
+     * 冲减本身靠**负向分录**表达（见 `JournalDraft.reversalOf`），金额没有第二种记法；
+     * 这个字段只负责溯源与幂等：没有它，用户先导出了新账单（状态已是「已全额退款」）、
+     * 又补导一份旧账单（状态还是「交易成功」）时，会被冲减第二次。
+     *
+     * 不加外键：凭证作废后仍要留下冲减痕迹，让它指向一条已作废的行比拦住写入要好。
+     */
+    val reversesJournalId: String? = null,
 
     val createdAt: Long,
     val updatedAt: Long,

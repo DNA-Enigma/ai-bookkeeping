@@ -82,51 +82,129 @@ class LedgerRepository @Inject constructor(
         val journalId = ids.newId()
         val now = clock.nowMillis()
         database.withTransaction {
-            database.journalDao().insert(
-                JournalEntity(
-                    id = journalId,
-                    dateEpochDay = draft.dateEpochDay,
-                    payee = draft.payee,
-                    note = draft.note,
-                    status = draft.status,
-                    source = draft.source,
-                    externalSource = draft.externalSource,
-                    externalRef = draft.externalRef,
-                    externalStatus = draft.externalStatus,
-                    place = draft.place,
-                    createdAt = now,
-                    updatedAt = now,
-                ),
-            )
-            database.postingDao().insertAll(
-                draft.postings.map { posting ->
-                    PostingEntity(
-                        id = ids.newId(),
-                        journalId = journalId,
-                        accountId = posting.accountId,
-                        amountMinor = posting.amount.amountMinor,
-                        currency = posting.amount.currency,
-                    )
-                },
-            )
-            // 明细与凭证在同一个事务里写：半截的明细比没有明细更糟，
-            // 界面会以为「这笔有明细」然后显示一片空白
-            if (draft.items.isNotEmpty()) {
-                database.journalItemDao().insertAll(
-                    draft.items.mapIndexed { index, item ->
-                        JournalItemEntity(
-                            id = ids.newId(),
-                            journalId = journalId,
-                            description = item.description,
-                            amountMinor = item.amountMinor,
-                            sortOrder = index,
-                        )
-                    },
-                )
+            insertDraft(journalId, draft, now)
+        }
+        return journalId
+    }
+
+    /**
+     * 冲减一笔已入账的凭证（退款、撤销、冲正）。
+     *
+     * **两件事必须在同一个事务里**：写反向凭证 + 把原凭证的外部状态推到最新。
+     * 只写冲减不更新状态，下次导入比对 `externalStatus` 会认为「又变了」，就冲第二次。
+     *
+     * 而且这里还会**拦住已经冲过的**：同一笔被冲两次就是账目凭空少一整笔金额，
+     * 比漏一笔更难发现（数字看着还挺合理）。宁可抛异常让人看见。
+     *
+     * @param originalExternalStatus 原凭证在平台侧的最新状态；null 表示不动它
+     *   （手记的账没有外部状态，冲减它不该凭空造一个出来）。
+     */
+    suspend fun postReversal(
+        draft: JournalDraft,
+        originalExternalStatus: String? = null,
+    ): String {
+        val originalId = requireNotNull(draft.reversesJournalId) {
+            "postReversal 只收冲减凭证——它必须带 reversesJournalId，否则无从知道冲的是哪一笔"
+        }
+        val journalId = ids.newId()
+        val now = clock.nowMillis()
+        database.withTransaction {
+            require(database.journalDao().findReversalOf(originalId) == null) {
+                "凭证 $originalId 已经被冲减过了，不再冲第二次"
+            }
+            insertDraft(journalId, draft, now)
+            if (originalExternalStatus != null) {
+                database.journalDao().updateExternalStatus(originalId, originalExternalStatus, now)
             }
         }
         return journalId
     }
+
+    private suspend fun insertDraft(journalId: String, draft: JournalDraft, now: Long) {
+        database.journalDao().insert(
+            JournalEntity(
+                id = journalId,
+                dateEpochDay = draft.dateEpochDay,
+                payee = draft.payee,
+                note = draft.note,
+                status = draft.status,
+                source = draft.source,
+                externalSource = draft.externalSource,
+                externalRef = draft.externalRef,
+                externalStatus = draft.externalStatus,
+                place = draft.place,
+                reversesJournalId = draft.reversesJournalId,
+                createdAt = now,
+                updatedAt = now,
+            ),
+        )
+        database.postingDao().insertAll(
+            draft.postings.map { posting ->
+                PostingEntity(
+                    id = ids.newId(),
+                    journalId = journalId,
+                    accountId = posting.accountId,
+                    amountMinor = posting.amount.amountMinor,
+                    currency = posting.amount.currency,
+                )
+            },
+        )
+        // 明细与凭证在同一个事务里写：半截的明细比没有明细更糟，
+        // 界面会以为「这笔有明细」然后显示一片空白
+        if (draft.items.isNotEmpty()) {
+            database.journalItemDao().insertAll(
+                draft.items.mapIndexed { index, item ->
+                    JournalItemEntity(
+                        id = ids.newId(),
+                        journalId = journalId,
+                        description = item.description,
+                        amountMinor = item.amountMinor,
+                        sortOrder = index,
+                    )
+                },
+            )
+        }
+    }
+
+    /** 一笔凭证的分录。冲减要照着原凭证反向，得先把原分录读出来。 */
+    suspend fun postingsOf(journalId: String): List<PostingEntity> =
+        database.postingDao().findByJournal(journalId)
+
+    /**
+     * 把一笔已入账的凭证读回成草稿。
+     *
+     * 冲减要照原凭证反向，所以得先把它的分录读回来；顺带由 [JournalDraft] 的构造校验
+     * 再确认一遍库里的这笔账是平的——库里若有坏账，冲减会**当场拒绝而不是把坏账放大一倍**。
+     * 读不出来（凭证不存在，或库里的分录已经不平）时返回 null。
+     */
+    suspend fun draftOf(journalId: String): JournalDraft? {
+        val journal = database.journalDao().findById(journalId) ?: return null
+        val postings = database.postingDao().findByJournal(journalId)
+        return runCatching {
+            JournalDraft(
+                dateEpochDay = journal.dateEpochDay,
+                payee = journal.payee,
+                note = journal.note,
+                source = journal.source,
+                postings = postings.map {
+                    PostingDraft(it.accountId, Money.of(it.amountMinor, it.currency))
+                },
+                status = journal.status,
+                place = journal.place,
+                externalSource = journal.externalSource,
+                externalRef = journal.externalRef,
+                externalStatus = journal.externalStatus,
+                reversesJournalId = journal.reversesJournalId,
+            )
+        }.getOrNull()
+    }
+
+    /** 一笔凭证冲减过没有。冲减的幂等依据，导入前先问一遍。 */
+    suspend fun isReversed(journalId: String): Boolean =
+        database.journalDao().findReversalOf(journalId) != null
+
+    /** 按 id 取账户。冲减要认出原凭证里哪一条分录是收支分类。 */
+    suspend fun accountOf(id: String): AccountEntity? = database.accountDao().findById(id)
 
     // ---------------------------------------------------------------- 去重
 

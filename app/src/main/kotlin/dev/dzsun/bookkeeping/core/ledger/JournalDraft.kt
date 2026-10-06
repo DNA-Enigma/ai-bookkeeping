@@ -57,6 +57,14 @@ data class JournalDraft(
     /** 平台侧原始状态（如「已全额退款」）。再导入时靠它比对出变化。 */
     val externalStatus: String? = null,
 
+    /**
+     * 这是一笔**冲减**，冲的是哪一笔凭证。
+     *
+     * 冲减的机制是负向分录（见 [reversalOf]），这个字段只负责**溯源**：
+     * 它让「那笔 -38 是哪来的」能回答得出来，也让重复导入不至于冲第二次。
+     */
+    val reversesJournalId: String? = null,
+
     /** 小票明细，纯粹是「买了什么」的描述，不参与记账。 */
     val items: List<ItemDraft> = emptyList(),
 ) {
@@ -90,10 +98,16 @@ data class JournalDraft(
         require(items.all { it.description.isNotBlank() }) {
             "明细的描述不能为空——空明细行对「想起买了什么」毫无用处"
         }
+        require(reversesJournalId == null || reversesJournalId.isNotBlank()) {
+            "reversesJournalId 要么不给，要么给出一个真的凭证 id——空串会让溯源查不到任何东西"
+        }
     }
 
     /** 是否来自外部流水。 */
     val isImported: Boolean get() = externalRef != null
+
+    /** 是不是一笔冲减（退款/撤销/冲正）。 */
+    val isReversal: Boolean get() = reversesJournalId != null
 
     val currency: String get() = postings.first().amount.currency
 
@@ -156,5 +170,79 @@ data class JournalDraft(
                 PostingDraft(toAccountId, amount),
             ),
         )
+
+        /**
+         * 冲减：把 [original] 的分录**反向**再记一笔。退款、撤销、冲正都是这一件事。
+         *
+         * **为什么是负向分录，而不是新的类型或标记。**
+         * 退款在复式里本来就是「原凭证的反向」，不需要第三样东西：
+         * 原支出是「资产 -38 / 支出分类 +38」，退款就是「资产 +38 / 支出分类 -38」。
+         * 分录之和照样为零，所以 [JournalDraft] 的构造校验**原样适用**，一行都不用改；
+         * 而月度统计只是把支出分类那一侧的分录求和，退款那笔自然把原消费抵消掉。
+         *
+         * 反过来，若新增 `JournalType.REFUND` 或 `isReversal` 标记，会有两个代价：
+         * 一是**标记与分录可以互相矛盾**（一笔标了 REFUND 却记成正向支出），
+         * 而分录是唯一被构造校验守住的东西，统计也只读分录，标记不参与任何计算；
+         * 二是 `JournalSource` 的语义是**渠道**（手记/拍票/流水/语音），
+         * 退款是一种「是什么」，不是一种「从哪来」——同一个渠道既能来一笔消费也能来一笔退款。
+         *
+         * 所以：**负号是机制，[reversesJournalId] 是溯源**。前者让账平，后者让「这笔 -38 哪来的」
+         * 回答得出来，也让重复导入不会冲第二次。
+         *
+         * [amount] 为 null 表示**全额冲减**（把每条分录原样取反，任意条数都行）；
+         * 给出金额表示**部分退款**（如平台状态写「已退款 ¥6.60」），此时原凭证必须是
+         * 两条分录的一收一支——部分退款按每条分录各自的符号反向，金额取 [amount]。
+         * 三条分录以上的拆分凭证做部分冲减需要按比例摊分，那套规则还没定，宁可拒绝也不猜。
+         *
+         * [dateEpochDay] 默认取原凭证的日期：流水里「同一行状态变成已退款」**不带退款时间**，
+         * 用它自己的消费日期等于把那笔消费在当月冲平，与「这笔最终没花钱」的认知一致。
+         * 若退款是独立一行（有自己的日期），传那一行的日期。
+         */
+        fun reversalOf(
+            original: JournalDraft,
+            amount: Money? = null,
+            dateEpochDay: Long = original.dateEpochDay,
+            source: JournalSource = original.source,
+            payee: String? = original.payee,
+            note: String? = null,
+            status: JournalStatus = JournalStatus.CLEARED,
+            reversesJournalId: String? = null,
+        ): JournalDraft {
+            val counterpartyOf: (PostingDraft) -> Money
+            if (amount == null) {
+                counterpartyOf = { posting -> -posting.amount }
+            } else {
+                require(amount.currency == original.currency) {
+                    "冲减金额的币种必须与原凭证一致：${amount.currency} 与 ${original.currency}"
+                }
+                require(amount.amountMinor > 0) {
+                    "冲减金额要传正数（退回来多少），实际为 ${amount.toPlainString()}"
+                }
+                require(original.postings.size == 2) {
+                    "部分冲减只支持两条分录的凭证（一收一支），" +
+                        "实际 ${original.postings.size} 条——拆分凭证要按比例摊分，规则未定，不猜"
+                }
+                require(amount <= original.postings.first().amount.abs()) {
+                    "退款金额 ${amount.toPlainString()} 超过原凭证金额 " +
+                        "${original.postings.first().amount.abs().toPlainString()}——多半是配错了原凭证"
+                }
+                // 原分录收的是负、支的是正，冲减各自反号
+                counterpartyOf = { posting ->
+                    if (posting.amount.isNegative()) amount else -amount
+                }
+            }
+
+            return JournalDraft(
+                dateEpochDay = dateEpochDay,
+                payee = payee,
+                note = note,
+                source = source,
+                status = status,
+                postings = original.postings.map { posting ->
+                    PostingDraft(posting.accountId, counterpartyOf(posting))
+                },
+                reversesJournalId = reversesJournalId,
+            )
+        }
     }
 }

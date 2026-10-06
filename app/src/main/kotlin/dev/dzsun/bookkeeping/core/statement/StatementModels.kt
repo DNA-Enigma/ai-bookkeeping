@@ -40,6 +40,17 @@ data class StatementRow(
     /** 时间原文，仅用于排查。 */
     val rawTime: String?,
     val rowNumber: Int,
+    /**
+     * 这行说的是**一笔已经退回来的钱**，不是一笔新花出去的钱。
+     *
+     * 判据是配置里的 `refund_markers` 命中了**状态列或交易类型列**（微信实测的状态
+     * 「已全额退款」「已退款¥6.60」、银行摘要里的「退款/退货」）。
+     *
+     * **金额列的负号不是判据**，这一点是刻意的：银行流水里普通的借方也常写成
+     * `-38.50`，靠符号判会把正常支出认成退款，而那是静默少记一笔钱——
+     * 比多记一笔更难发现。方向仍以收/支列（借贷标志）为准，符号照旧剥掉。
+     */
+    val isRefund: Boolean = false,
 )
 
 /** 一行为什么被排除。**排除必须给出理由**，否则用户无法判断是解析错了还是本就该跳过。 */
@@ -125,6 +136,22 @@ data class StatementFormat(
      * 钱确实动过，将来要靠它发现状态变化并冲减。
      */
     @SerialName("skip_statuses") val skipStatuses: List<String> = emptyList(),
+    /**
+     * 「状态」或「交易类型」列里出现其中任意一个，这行就是一笔**退款**。
+     *
+     * 微信实测的状态取值：`已全额退款`、`已退款¥6.60`，都被 `退款` 命中。
+     * **不拿「商品说明」去对**——那列是自由文本，商户名或商品名里带「退款」二字的
+     * 正常消费会中招，而误判的后果是静默少记一笔支出。
+     */
+    @SerialName("refund_markers") val refundMarkers: List<String> = emptyList(),
+    /**
+     * 状态里出现其中任意一个，说明是**全额**退款——冲减金额等于原消费金额。
+     *
+     * 与 [refundMarkers] 分开是因为两者回答的是不同问题：前者「这是不是退款」，
+     * 这里「退了多少」。都不命中时退多少只能从状态文本里的金额去认（见 `RefundAmount`），
+     * 认不出来就**不猜**，那行只展示不入库。
+     */
+    @SerialName("full_refund_markers") val fullRefundMarkers: List<String> = emptyList(),
     /** 金额列可能带这些前缀/修饰，解析前要剥掉。 */
     @SerialName("amount_strip") val amountStrip: List<String> = listOf("¥", "￥", ",", "，"),
     /** 时间列的格式，按顺序试。 */

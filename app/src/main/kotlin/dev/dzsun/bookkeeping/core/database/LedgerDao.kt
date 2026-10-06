@@ -27,6 +27,13 @@ data class LedgerRow(
     val currency: String,
     /** 发生地点。详情页与列表副标题用它当「几周后想起来」的锚点。 */
     val place: String? = null,
+    /**
+     * 非空即这是一笔**冲减**，值是它冲的那笔凭证。
+     *
+     * 界面靠它把「退款」和「一笔负数的支出」分开说——两者金额都不好看，
+     * 但前者用户能理解，后者用户会以为记错了。
+     */
+    val reversesJournalId: String? = null,
 )
 
 @Dao
@@ -85,6 +92,7 @@ interface JournalDao {
                j.status AS status,
                j.source AS source,
                j.place AS place,
+               j.reversesJournalId AS reversesJournalId,
                p.accountId AS categoryId,
                a.name AS categoryName,
                a.type AS categoryType,
@@ -116,6 +124,24 @@ interface JournalDao {
         """,
     )
     suspend fun findByExternalRef(source: String, ref: String): JournalEntity?
+
+    /**
+     * 这笔凭证已经被冲减过没有。冲减的**幂等依据**。
+     *
+     * 光靠比对 `externalStatus` 是不够的：用户先导出一份新账单（状态已是
+     * 「已全额退款」）冲减了一次，回头又补导一份旧账单（状态还写着「交易成功」），
+     * 状态一比对又是「变了」，就会冲第二次。
+     */
+    @Query("SELECT * FROM journal WHERE reversesJournalId = :journalId LIMIT 1")
+    suspend fun findReversalOf(journalId: String): JournalEntity?
+
+    /**
+     * 只更新平台侧的原始状态，其余一概不动。
+     *
+     * 冲减写完之后要把原凭证的状态推到最新，否则下次导入比对状态时又会认为「变了」。
+     */
+    @Query("UPDATE journal SET externalStatus = :status, updatedAt = :updatedAt WHERE id = :journalId")
+    suspend fun updateExternalStatus(journalId: String, status: String?, updatedAt: Long)
 
     /**
      * 这个商户以前被归到哪个分类——**用用户自己的历史，不用模型**。
