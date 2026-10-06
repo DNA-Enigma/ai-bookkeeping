@@ -3,6 +3,8 @@ package dev.dzsun.bookkeeping.core.ledger
 import androidx.room.withTransaction
 import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.database.AccountType
+import dev.dzsun.bookkeeping.core.database.CategoryTotal
+import dev.dzsun.bookkeeping.core.database.MonthlyTotal
 import dev.dzsun.bookkeeping.core.database.JournalEntity
 import dev.dzsun.bookkeeping.core.database.JournalStatus
 import dev.dzsun.bookkeeping.core.database.LedgerDatabase
@@ -40,6 +42,24 @@ class LedgerRepository @Inject constructor(
     /** 某个会计类型在日期区间内的净额，用于月度收支合计。 */
     fun observeTotal(type: AccountType, currency: String, from: java.time.LocalDate, to: java.time.LocalDate): Flow<Long> =
         database.postingDao().observeTotal(type, currency, from.toEpochDay(), to.toEpochDay())
+
+    /**
+     * 分类合计（账目投影）。
+     *
+     * **聚合在 SQL 里做**，不要在界面层把整本账目拉进内存再筛。账本只会越长越大，
+     * 而 `observeEntries()` 每次变动都会重发全表；报表这种「只需要合计」的视图
+     * 没有理由为此付出全表装载的代价。
+     */
+    fun observeCategoryTotals(type: AccountType, from: java.time.LocalDate, to: java.time.LocalDate): Flow<List<CategoryTotal>> =
+        database.postingDao().observeCategoryTotals(type, from.toEpochDay(), to.toEpochDay())
+
+    /**
+     * 按月分组的收支合计（账目投影）。
+     *
+     * 一次查全部月份，而不是每个月各查一次——后者是 O(月数 × 全表)。
+     */
+    fun observeMonthlyTotals(from: java.time.LocalDate, to: java.time.LocalDate): Flow<List<MonthlyTotal>> =
+        database.postingDao().observeMonthlyTotals(from.toEpochDay(), to.toEpochDay())
 
     /**
      * 落一笔账。凭证与分录在同一个事务里写入，

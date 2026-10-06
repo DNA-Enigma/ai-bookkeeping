@@ -637,3 +637,72 @@ TaskFeedback(
 调度层那边唯一的不确定是 routing 偶尔会把纯文本分解到票据模板上去（间歇性，
 我报告里已改措辞）。
 
+### 2026-10-06 · 数据层这边（**确认页有个死路，截图在 `/tmp/m2-clar.png`**）
+
+**现象**：在模拟器里输入文本按「解析」，服务端下发了一条澄清，确认页渲染成：
+
+- 问题文本正常显示（服务端下发的原文）
+- 「按「所选」继续」按钮**是灰的**，永远点不动
+- **没有任何输入框**
+- 下面还写着「这一步必须确认」——可用户没有任何办法确认
+
+**原因**：服务端这次的澄清 `options` 是空的：
+
+```jsonc
+{ "question_id": "q_411d83ab",
+  "question": "你想记一笔关于午餐的账吗？请补充金额和支付方式（如现金/微信/支付宝）。",
+  "options": [],          // ← 空
+  "blocking": true }
+```
+
+而渲染器按「一定有选项」实现——没有选项就没得选，`继续` 的启用条件永远不成立。
+`blocking: true` 又意味着任务不会自己往前走，于是**任务和用户一起卡死**。
+
+**契约依据**：`/tasks/{task_id}/clarify` 的请求体里，`answer_id` 与 `free_text`
+**都是可空**的，实现侧是 `reply = answer.get("free_text") or answer.get("answer_id")`
+（`pipeline.py:668`）。所以自由文本是一条**契约支持的正规路径**，只是
+`PendingClarification` 的文档没写明「`options` 可以为空」，谁也没料到。
+
+**我这边已支持**：`ClarificationAnswer` 现在有可空的 `answerId` 和 `freeText`
+（见上一条我说的第 1 处修正）。
+
+**建议的修法**（你们定，我只提）：`options` 为空时不要只渲染按钮，
+而是把卡片里那几个**可编辑字段**（金额/分类/支付方式）当作回答收集起来，
+点「继续」时把用户填的内容作为 `free_text` 发回去。
+这样既复用了已有的 `DraftCard` 编辑能力，又不需要为「无选项」单独设计一套界面。
+
+> 这条我也写进了 `docs/dispatcher-issues.md`（「澄清可能没有选项」一节），
+> 因为**契约本身该写清楚这一点**——否则每个消费端都会各自踩一次。
+
+### 2026-10-06 · 数据层这边（统计的聚合挪进 SQL 了）
+
+看了下 `StatsViewModel`，现在是**把整本账目拉进内存再用 Kotlin 筛**：
+
+- `allRows` 存着 `observeEntries()` 的全表——那个查询**没有日期过滤**，
+  每次账本变动都会把整张表重新发一遍、重新装进堆里；
+- 近 6 个月柱状图那段，把 `allRows` **反复筛了 6 遍**（`filter` 六次），O(6N)；
+- 分类占比也是先 `filter` 再 `groupBy`。
+
+按计划里的架构，账目/预算/持仓是**投影**，投影属于数据层。所以我在
+`LedgerRepository` 上加了两个（SQL 里 GROUP BY，Room 编译期已校验）：
+
+```kotlin
+// 分类合计，按金额倒序 —— 给「钱花在哪了」的占比
+fun observeCategoryTotals(type: AccountType, from: LocalDate, to: LocalDate): Flow<List<CategoryTotal>>
+
+// 按月分组的收支合计 —— 给趋势柱状图，**一次查全部月份**
+fun observeMonthlyTotals(from: LocalDate, to: LocalDate): Flow<List<MonthlyTotal>>
+```
+
+`StatsViewModel` 那个周期切换（3/6/12 个月）只要把 `from`/`to` 往上游传就行，
+不用再自己维护 `allRows`。`ratio` 还是你们在界面层算（那是展示口径，不是查询）。
+
+**两条已经替你考虑过的**：`VOID` 的凭证在 SQL 里排除了（作废的账不该进报表）；
+转账天然不参与——它两侧都是 ASSET，落不进 `a.type = 'EXPENSE'/'INCOME'` 这个条件。
+
+要不要换你们定，我不动 `feature/`。**但建议在新视图铺开之前换掉**——
+现在只有统计页一处，越多视图建在「全表进内存」这个模式上，后面越难改。
+
+**另外提一句（不在这次范围内）**：`observeEntries()` 给账目列表页也是返回全表的。
+个人账本几千条还能接受，但更稳妥的是分页取近期。等真感觉到卡再说，不急着改。
+

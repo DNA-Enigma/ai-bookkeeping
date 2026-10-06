@@ -97,6 +97,23 @@ interface JournalDao {
     fun observeLedgerRows(): Flow<List<LedgerRow>>
 }
 
+/**
+ * 某个分类在区间内的合计。**聚合在 SQL 里做**，不要把整本账目拉进内存再用 Kotlin 过滤——
+ * 账本会随时间增长，而 `observeEntries()` 每次变动都会重发全表。
+ */
+data class CategoryTotal(
+    val categoryId: String,
+    val categoryName: String,
+    val amountMinor: Long,
+)
+
+/** 某个月某个方向的合计。[yearMonth] 形如 `2026-10`。 */
+data class MonthlyTotal(
+    val yearMonth: String,
+    val accountType: AccountType,
+    val amountMinor: Long,
+)
+
 @Dao
 interface PostingDao {
 
@@ -126,4 +143,55 @@ interface PostingDao {
         """,
     )
     fun observeTotal(type: AccountType, currency: String, fromEpochDay: Long, toEpochDay: Long): Flow<Long>
+
+    /**
+     * 分类合计，用于「钱花在哪了」的占比。
+     *
+     * 排除了 `VOID`——作废的账不该出现在报表里。转账自然不参与：
+     * 它两侧都是 ASSET，落不进 `a.type = :type` 这个条件。
+     */
+    @Query(
+        """
+        SELECT p.accountId AS categoryId,
+               a.name AS categoryName,
+               SUM(p.amountMinor) AS amountMinor
+        FROM posting p
+        JOIN account a ON a.id = p.accountId
+        JOIN journal j ON j.id = p.journalId
+        WHERE a.type = :type
+          AND j.status != 'VOID'
+          AND j.dateEpochDay BETWEEN :fromEpochDay AND :toEpochDay
+        GROUP BY p.accountId, a.name
+        ORDER BY amountMinor DESC
+        """,
+    )
+    fun observeCategoryTotals(
+        type: AccountType,
+        fromEpochDay: Long,
+        toEpochDay: Long,
+    ): Flow<List<CategoryTotal>>
+
+    /**
+     * 按月分组的收支合计，用于趋势柱状图。
+     *
+     * `dateEpochDay * 86400` 再配 `'unixepoch'` 是**精确往返**的：
+     * epochDay 是天数，乘回秒数落在 UTC 午夜，不会有时区偏移。
+     * 一次查询出全部月份，而不是每个月各查一次。
+     */
+    @Query(
+        """
+        SELECT substr(date(j.dateEpochDay * 86400, 'unixepoch'), 1, 7) AS yearMonth,
+               a.type AS accountType,
+               SUM(p.amountMinor) AS amountMinor
+        FROM posting p
+        JOIN account a ON a.id = p.accountId
+        JOIN journal j ON j.id = p.journalId
+        WHERE a.type IN ('EXPENSE', 'INCOME')
+          AND j.status != 'VOID'
+          AND j.dateEpochDay BETWEEN :fromEpochDay AND :toEpochDay
+        GROUP BY yearMonth, a.type
+        ORDER BY yearMonth
+        """,
+    )
+    fun observeMonthlyTotals(fromEpochDay: Long, toEpochDay: Long): Flow<List<MonthlyTotal>>
 }
