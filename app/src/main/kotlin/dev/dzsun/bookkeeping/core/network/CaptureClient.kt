@@ -2,6 +2,7 @@ package dev.dzsun.bookkeeping.core.network
 
 import dev.dzsun.bookkeeping.BuildConfig
 import dev.dzsun.bookkeeping.core.platform.IdGenerator
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.delay
@@ -70,7 +71,11 @@ class CaptureClient @Inject constructor(
         // 契约：同步且已跑到终态时，POST 会把结果内联返回（200，带 result/error）。
         // 这时再开事件流是多余的——快照已经在手，流却要等重放，白多一个依赖。
         if (accepted.status in TaskSnapshot.TERMINAL_STATUSES) {
-            return@withTimeout describe(accepted.taskId, client.getTask(accepted.taskId), null)
+            return@withTimeout CaptureOutcome.fromSnapshot(
+                accepted.taskId,
+                client.getTask(accepted.taskId),
+                null,
+            )
         }
 
         collectOutcome(accepted.taskId)
@@ -85,17 +90,24 @@ class CaptureClient @Inject constructor(
     private suspend fun collectOutcome(taskId: String): CaptureOutcome {
         var fields: ReceiptFields? = null
 
-        val terminal = client.eventStream(taskId)
-            .onEach { event ->
-                event.parseReceiptFields()?.let { fields = it }
-            }
-            .firstOrNull { it.type in STOP_EVENT_TYPES }
+        val terminal = try {
+            client.eventStream(taskId)
+                .onEach { event ->
+                    event.parseReceiptFields()?.let { fields = it }
+                }
+                .firstOrNull { it.type in STOP_EVENT_TYPES }
+        } catch (e: IOException) {
+            // 流**中途**断了。只吞 IOException：它是传输层断开的形状，而 CancellationException
+            // 必须往上抛——吞了它，外层的 withTimeout 就失效了。
+            null
+        }
 
-        // 流没给出终态就结束了。退后台、切网、代理把 SSE 缓冲住，或服务端的流本身有问题，
-        // 都会走到这里。契约允许以快照为准重建视图，所以退一步问快照——把一个服务端
-        // 其实已经跑完的任务当成失败，等于让用户白拍一张。
+        // 流没给出终态就结束了或断了。退后台、切网、代理把 SSE 缓冲住，或服务端的流本身
+        // 有问题，都会走到这里。契约允许以快照为准重建视图，所以退一步问快照——
+        // 把一个服务端其实已经跑完的任务当成失败，等于让用户白拍一张。
+        // 断流之前已经收到的事件产物（fields）照样留着。
         if (terminal == null) {
-            return describe(taskId, awaitTerminalSnapshot(taskId), fields)
+            return CaptureOutcome.fromSnapshot(taskId, awaitTerminalSnapshot(taskId), fields)
         }
 
         if (terminal.type == TaskEvent.TYPE_CLARIFICATION_NEEDED) {
@@ -109,62 +121,7 @@ class CaptureClient @Inject constructor(
             }
         }
 
-        return describe(taskId, runCatching { client.getTask(taskId) }.getOrNull(), fields)
-    }
-
-    /**
-     * 快照 → 终局。**所有终态都从这里出**，不在事件类型与快照状态两处各判一次，
-     * 否则两处口径一漂就会给出互相矛盾的结论。
-     */
-    private fun describe(
-        taskId: String,
-        snapshot: TaskSnapshot?,
-        fields: ReceiptFields?,
-    ): CaptureOutcome {
-        if (snapshot == null) {
-            return CaptureOutcome.Failed(
-                taskId,
-                Problem(
-                    type = "about:blank",
-                    title = "读不到任务状态",
-                    status = 200,
-                    code = "missing_artifacts",
-                    retryable = true,
-                    detail = "事件流已结束，快照也取不到——多半是网络断了",
-                ),
-                fields,
-            )
-        }
-
-        if (snapshot.status == TaskSnapshot.STATUS_SUCCEEDED) {
-            val entry = snapshot.artifacts.ledgerEntry()
-            val resolved = fields
-                ?: entry?.toReceiptFields()
-                ?: snapshot.artifacts.receiptFields()
-            return if (resolved == null) {
-                CaptureOutcome.Failed(
-                    taskId,
-                    Problem(
-                        type = "about:blank",
-                        title = "任务成功但没有可用的抽取结果",
-                        status = 200,
-                        code = "missing_artifacts",
-                        retryable = false,
-                    ),
-                    null,
-                )
-            } else {
-                CaptureOutcome.Completed(taskId, resolved, entry)
-            }
-        }
-
-        snapshot.clarification?.let {
-            if (snapshot.isAwaitingClarification) {
-                return CaptureOutcome.NeedsClarification(taskId, it, fields)
-            }
-        }
-
-        return CaptureOutcome.Failed(taskId, snapshot.error, fields)
+        return CaptureOutcome.fromSnapshot(taskId, runCatching { client.getTask(taskId) }.getOrNull(), fields)
     }
 
     /**

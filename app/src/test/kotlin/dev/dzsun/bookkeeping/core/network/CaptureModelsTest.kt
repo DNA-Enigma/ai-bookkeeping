@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -141,6 +142,103 @@ class CaptureModelsTest {
         val partial = artifacts.receiptFields()
         assertEquals(3850L, partial?.money()?.amountMinor)
         assertEquals("星巴克咖啡（国贸店）", partial?.merchant)
+    }
+
+    // ---------- 快照 → 终局 ----------
+
+    private fun snapshot(raw: String): TaskSnapshot =
+        json.decodeFromJsonElement(TaskSnapshot.serializer(), obj(raw))
+
+    @Test
+    fun `任务失败时已完成节点的产物必须带出来`() {
+        // 实测情形：extract 抽对了字段，下游 normalize 超时导致整单失败。
+        // 契约明写「已完成节点的产物保留并如实上报」，服务端也确实保留
+        // （runner.py 收集所有产出过输出的节点，与任务成败无关）。
+        // 客户端在这里丢掉产物 = 让用户白拍一张，这条就是防这个的。
+        val failed = snapshot(
+            """
+            {"task_id": "task_x", "user_id": "local", "status": "failed", "source": "api",
+             "mode": "async", "progress": 1.0,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "artifacts": {"extract": {"amount": 38.5, "currency": "CNY",
+                                       "merchant": "星巴克咖啡（国贸店）", "direction": "expense",
+                                       "confidence": 0.98}},
+             "error": {"type": "about:blank", "title": "节点 normalize 失败", "status": 200,
+                       "code": "upstream_llm_error", "retryable": true,
+                       "detail": "请求超时（8.0s，档位 standard）"}}
+            """,
+        )
+
+        val outcome = CaptureOutcome.fromSnapshot("task_x", failed, null)
+
+        val f = outcome as CaptureOutcome.Failed
+        assertEquals(3850L, f.partialFields?.money()?.amountMinor)
+        assertEquals("星巴克咖啡（国贸店）", f.partialFields?.merchant)
+        assertNotNull("失败必须给出可读的原因", f.problem)
+    }
+
+    @Test
+    fun `整单失败且没有任何节点产出时产物就是空的`() {
+        // 实测：文本任务在 dedupe_check / write_entry 这类节点上因输入引用解析不了而失败，
+        // artifacts 是 **{}**——那时一个节点都没产出过，没有产物可保。
+        // 把它和上一条分开，是为了让「有产物必须保留」这条断言仍然可证伪：
+        // 若哪天客户端把非空 artifacts 吞了，上一条会红，而不是被这一条掩盖。
+        val failed = snapshot(
+            """
+            {"task_id": "task_y", "user_id": "local", "status": "failed", "source": "api",
+             "mode": "async", "progress": 1.0,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "artifacts": {},
+             "error": {"type": "about:blank", "title": "handler error", "status": 200,
+                       "code": "handler_error", "retryable": false,
+                       "detail": "节点 dedupe_check 失败：节点输入引用无法解析：'envelope.text'"}}
+            """,
+        )
+
+        val f = CaptureOutcome.fromSnapshot("task_y", failed, null) as CaptureOutcome.Failed
+        assertNull(f.partialFields)
+        assertNotNull(f.problem)
+    }
+
+    @Test
+    fun `快照取不到时不算成功也不算澄清`() {
+        val f = CaptureOutcome.fromSnapshot("task_z", null, null) as CaptureOutcome.Failed
+        assertNotNull(f.problem)
+        assertTrue("快照取不到多半是网络问题，应当可重试", f.problem!!.retryable)
+    }
+
+    @Test
+    fun `任务成功但产物为空时不假装成功`() {
+        val succeeded = snapshot(
+            """
+            {"task_id": "task_w", "user_id": "local", "status": "succeeded", "source": "api",
+             "mode": "async", "progress": 1.0,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "artifacts": {}}
+            """,
+        )
+
+        val f = CaptureOutcome.fromSnapshot("task_w", succeeded, null) as CaptureOutcome.Failed
+        assertEquals("missing_artifacts", f.problem?.code)
+    }
+
+    @Test
+    fun `等待澄清时优先给澄清而不是失败`() {
+        val awaiting = snapshot(
+            """
+            {"task_id": "task_c", "user_id": "local", "status": "awaiting_clarification",
+             "source": "api", "mode": "async", "progress": 0.5,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "clarification": {"question_id": "q_1",
+                               "question": "请补充金额和支付方式", "blocking": true,
+                               "options": []}}
+            """,
+        )
+
+        val c = CaptureOutcome.fromSnapshot("task_c", awaiting, null) as CaptureOutcome.NeedsClarification
+        assertEquals("请补充金额和支付方式", c.clarification.question)
+        // 实测服务端会下发空 options，那时只能走自由文本——渲染器必须知道这一点
+        assertTrue(c.clarification.options.isEmpty())
     }
 
     // ---------- 事件载荷 ----------

@@ -132,6 +132,74 @@ sealed interface CaptureOutcome {
         val problem: Problem?,
         val partialFields: ReceiptFields?,
     ) : CaptureOutcome
+
+    companion object {
+        /**
+         * 快照 → 终局。**所有终态都从这里出**，不在「事件类型」与「快照状态」两处各判一次，
+         * 否则两处口径一漂就会给出互相矛盾的结论。
+         *
+         * [fields] 是事件流里已经攒到的抽取产物。它比快照先到，而且在任务最终失败时
+         * 往往**是唯一还在的东西**——契约明写「已完成节点的产物保留并如实上报」，
+         * 服务端也确实这么做了（`runner.py` 收集所有产出过输出的节点，与任务成败无关）。
+         * 所以失败分支必须把它带上：丢掉等于让用户白拍一张。
+         */
+        internal fun fromSnapshot(
+            taskId: String,
+            snapshot: TaskSnapshot?,
+            fields: ReceiptFields?,
+        ): CaptureOutcome {
+            if (snapshot == null) {
+                return Failed(
+                    taskId,
+                    Problem(
+                        type = "about:blank",
+                        title = "读不到任务状态",
+                        status = 200,
+                        code = "missing_artifacts",
+                        retryable = true,
+                        detail = "事件流已结束，快照也取不到——多半是网络断了",
+                    ),
+                    fields,
+                )
+            }
+
+            if (snapshot.status == TaskSnapshot.STATUS_SUCCEEDED) {
+                val entry = snapshot.artifacts.ledgerEntry()
+                val resolved = fields
+                    ?: entry?.toReceiptFields()
+                    ?: snapshot.artifacts.receiptFields()
+                return if (resolved == null) {
+                    Failed(
+                        taskId,
+                        Problem(
+                            type = "about:blank",
+                            title = "任务成功但没有可用的抽取结果",
+                            status = 200,
+                            code = "missing_artifacts",
+                            retryable = false,
+                        ),
+                        null,
+                    )
+                } else {
+                    Completed(taskId, resolved, entry)
+                }
+            }
+
+            snapshot.clarification?.let {
+                if (snapshot.isAwaitingClarification) {
+                    return NeedsClarification(taskId, it, fields)
+                }
+            }
+
+            // 失败分支**同样**要翻快照里的产物。[fields] 来自事件流，只在流活着时才有；
+            // 流断在半路、或失败发生在客户端连上之前时它是 null，而快照里 extract 的产物
+            // 可能好好地在那儿。只认 [fields] 就会把它们丢掉——那正是「用户白拍一张」。
+            val partial = fields
+                ?: snapshot.artifacts.ledgerEntry()?.toReceiptFields()
+                ?: snapshot.artifacts.receiptFields()
+            return Failed(taskId, snapshot.error, partial)
+        }
+    }
 }
 
 /** 请求一次捕获。文字与媒体至少给一个。 */

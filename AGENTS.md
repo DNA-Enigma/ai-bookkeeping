@@ -998,3 +998,40 @@ place | items
 
 **构建绿，95 个单元测试 0 失败**（新增 `ImportModelsTest` 11 个：
 汇总数字、跳过标注、兜底分类、金额方向符号）。可以走一遍导入流程了。
+
+### 2026-10-06 · 数据层这边（M2 收尾 + 两条要你配合的）
+
+**1. ⚠️ `authoritative` 我临时改成 `false` 了**（`CaptureClient.kt`）。
+
+理由：置 `true` 时服务端会走另一套拆解，实测跑到 `record_expense` 模板时
+节点输入引用解析不了（`envelope.user_text` 断了）→ 整单失败；`false` 时
+路由到 `single_tool_action` / `vision_extract_then_write`，两条都跑得通。
+**这是临时绕行**，dispatcher 修完 P0-1c 后要切回 `true`（见 `docs/status-data-layer.md` 第五节）。
+
+**2. ⚠️ 服务端的 SSE 端点现在是坏的，跟你们联调有关。**
+
+`GET /v1/tasks/{id}/events` 返回 **0 字节**就断，服务端日志
+`UnboundLocalError: cannot access local variable 'to_sse'`。
+根因是 `app.py` 的 `gen()` 里 `from ..core.events import … to_sse` 写在
+`if len(backlog) > replay_limit:` 分支内，Python 因此把 `to_sse` 当整个函数的局部名。
+**所以现在别指望事件流**；客户端已退回按快照轮询兜底，界面侧不用改。
+
+**3. 我修了一个会咬到你们的客户端 bug：任务失败时丢弃快照里的产物。**
+
+原来失败分支只认事件流攒下来的字段，从不回看快照——而流可能压根没活着。
+结果是「extract 抽对了字段，下游挂了」时用户白拍一张。已改为两级兜底。
+**你们那条「别丢半截产物」的界面路径现在有真实数据可渲染了**，有单测盖着。
+
+**4. 📌 一条给界面侧的情报：服务端的分类名现在拿得到，但确认页没用。**
+
+`LedgerEntry.category`（如「餐饮」）和 `ReceiptFields.category` 已经在 DTO 里了，
+而 `ReceiptFields.toDraftCard()` 现在是无条件取 `pool.firstOrNull()?.id`——
+服务端归好的类被丢掉，用户看到的是科目表第一项。这是 `feature/entry/` 的文件，
+归你们，我没动。接一下就能用上。
+
+**5. 顺带**：契约那四个 `bookkeeping.*` schema **已经冻结**了
+（`smart-dispatcher/schemas/bookkeeping_*.json`），我按冻结后的形状校准了 DTO——
+注意 `LedgerEntry` 的主键从 `id`/`_token` 变成了 **`entry_id`**，
+多了 `occurred_at`/`source_task`/`note`。如果你们哪里自己解过这个形状，要跟着改。
+
+**构建绿，111 个测试 0 失败**（2 个联调用例默认跳过，要 `DISPATCHER_LIVE=1` 才跑）。
