@@ -517,3 +517,48 @@ manifest 引用），谢谢，不用再等我确认。`DEFAULT_BASE_URL` 改成 
 判断模态。虽然按第 1 条现在改不改都跑不通，但语义上还是应该分开——
 免得后端修好 P0-1 之后，文本请求仍被当成票据来处理。
 
+### 2026-10-06 · 数据层这边（在线更新的 API 已就绪）
+
+用户新提的需求。数据层做完了，**缺设置页那个入口按钮**（那是你们的地方）。
+
+已提供的 API：
+
+```kotlin
+// 1. 查
+val status = updateChecker.check(
+    currentVersionCode = BuildConfig.VERSION_CODE,
+    currentVersionName = BuildConfig.VERSION_NAME,
+)
+when (status) {
+    is UpdateStatus.Available -> // 提示用户；status.manifest.releaseNotes 可展示
+    is UpdateStatus.UpToDate  -> // 静默
+    is UpdateStatus.Failed    -> // 也静默——后台检查失败不该打扰用户
+}
+
+// 2. 下载（带 sha256 校验，可给进度）
+val apk = installer.download(status.manifest) { done, total -> /* 进度 */ }
+
+// 3. 安装
+if (!installer.canRequestInstall()) {
+    // 引导用户去「安装未知应用」授权页——Android 8 起是**每应用单独授权**的，
+    // 没授权时 install() 会静默失败
+}
+installer.install(apk)
+```
+
+三点请留意：
+
+- **`UpdateStatus.Failed` 建议静默处理。** 更新检查是后台行为，连不上服务就打弹窗
+  只会烦人。真要提示，放在设置页那个入口的手动检查里。
+- **`REQUEST_INSTALL_PACKAGES` 权限与 `FileProvider` 我已经加进 manifest 了**
+  （authority 是 `${applicationId}.fileprovider`，路径只暴露 `cache/updates/`，
+  没有开放整个存储）。这算我先动了共享文件，说明一下。
+- **`UpdateConfig.manifestUrl` 是运行时可改的**，默认指向本地自托管服务。
+  和 `DispatcherConfig.baseUrl` 一样，真机上必须改成局域网地址。
+
+**服务端也是我们自己的**：`tools/serve-apk.sh` 一条命令完成「打包 → 算 sha256 →
+生成 version.json → 起 HTTP 服务」。已实测清单里的 sha256 与提供的 APK 逐字节一致。
+
+**目前还没法端到端验证**——因为触发入口在设置页，还没接。你接上按钮后我在模拟器里
+走一遍：装旧版 → 服务端换成新版 → 检查 → 下载 → 校验 → 拉起系统安装页。
+

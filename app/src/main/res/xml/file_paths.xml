@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只暴露缓存里那一个存放待安装 APK 的目录。
+  不要写 root-path 或 external-path —— 那会把整个存储开放给拿到 URI 的任意应用。
+-->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>
