@@ -134,12 +134,16 @@ fun buildClarificationAnswer(
 /**
  * 调度层抽出来的票据字段 → 确认卡。金额走 [ReceiptFields.money]，不经过浮点。
  * 分类按名字从科目池匹配，匹配不上留空由用户选——分类是数据不是代码。
+ *
+ * [fieldConfidence] 是契约里的分字段置信度（服务端当前恒不产出）。有它时
+ * 挑出最低的那个字段，确认卡上提示用户重点核对——没有就不提示，不编。
  */
 fun ReceiptFields.toDraftCard(
     id: String,
     todayEpochDay: Long,
     expenseCategories: List<dev.dzsun.bookkeeping.core.database.AccountEntity>,
     incomeCategories: List<dev.dzsun.bookkeeping.core.database.AccountEntity>,
+    fieldConfidence: Map<String, Float>? = null,
 ): DraftCard {
     val kind = if (isExpense) EntryKind.EXPENSE else EntryKind.INCOME
     val pool = if (kind == EntryKind.INCOME) incomeCategories else expenseCategories
@@ -155,8 +159,16 @@ fun ReceiptFields.toDraftCard(
         // 如实传：拿不到就是 null，别在这里补成 0——补了以后就分不出
         // 「识别得很勉强」和「压根没给置信度」
         confidence = confidence?.toFloat(),
+        weakestField = weakestFieldName(fieldConfidence),
     )
 }
+
+/**
+ * 分字段置信度里最低的那个字段名。地图为空或没有条目时返回 null——
+ * **没有就是没有**，不拿整体置信度冒充字段级提示。
+ */
+fun weakestFieldName(fieldConfidence: Map<String, Float>?): String? =
+    fieldConfidence?.entries?.minByOrNull { it.value }?.key
 
 private fun parseDateEpochDay(raw: String?): Long? {
     if (raw.isNullOrBlank()) return null

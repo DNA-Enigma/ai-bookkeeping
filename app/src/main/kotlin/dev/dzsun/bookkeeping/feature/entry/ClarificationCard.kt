@@ -164,9 +164,25 @@ fun NeedsConfirmChip(modifier: Modifier = Modifier) {
  *
  * 说的是**该核对什么**，而不是只报一个数字：「置信度 0.62」对用户没有意义，
  * 「识别置信度较低，请核对金额和分类」才是他能照着做的事。
+ *
+ * [weakestField] 是分字段置信度里最低的那个（服务端当前多半给不出）。
+ * 有它就精确到那一项，没有就退回通用文案——**不编造字段名**。
  */
 @Composable
-fun LowConfidenceHint(modifier: Modifier = Modifier) {
+fun LowConfidenceHint(
+    weakestField: String? = null,
+    modifier: Modifier = Modifier,
+) {
+    val what = when (weakestField?.lowercase()) {
+        "amount", "金额" -> "金额"
+        "merchant", "payee", "商家" -> "商家"
+        "category", "分类" -> "分类"
+        "datetime", "date", "时间", "日期" -> "时间"
+        "payment_method", "支付方式" -> "支付方式"
+        "direction", "收支方向" -> "收支方向"
+        "note", "notes", "备注" -> "备注"
+        else -> null
+    }
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
@@ -179,7 +195,7 @@ fun LowConfidenceHint(modifier: Modifier = Modifier) {
         )
         Spacer(Modifier.width(6.dp))
         Text(
-            "识别置信度较低，请核对金额和分类",
+            if (what != null) "识别置信度较低，请重点核对$what" else "识别置信度较低，请核对金额和分类",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.error,
         )

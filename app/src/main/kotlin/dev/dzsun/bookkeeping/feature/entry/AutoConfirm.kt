@@ -1,11 +1,13 @@
 package dev.dzsun.bookkeeping.feature.entry
 
 import android.content.Context
+import androidx.room.withTransaction
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import dev.dzsun.bookkeeping.core.database.LedgerDatabase
 import dev.dzsun.bookkeeping.core.ledger.ConfidenceGate
 import dev.dzsun.bookkeeping.core.ledger.EntryRuleCatalog
 import javax.inject.Inject
@@ -64,31 +66,67 @@ class PrefsAutoConfirmSettings @Inject constructor(
 /**
  * 撤销一笔刚自动入账的账。
  *
- * ⚠️ **目前没有实现，界面因此不显示撤销按钮。** 原因是硬缺口而不是没做：
- * `LedgerRepository` 只有 `post`，没有作废/删除；直接拿 `journalDao().deleteById`
- * 会绕过凭证与分录的同一事务，留下孤儿分录。而 `core/ledger` 是数据层的地方
- * （分工见 AGENTS.md），界面的手够不着，也不该伸过去。
+ * 产品口径是**删除**（不是作废留痕）：撤销窗口只在会话内，用户刚看见就反悔，
+ * 那笔不该在账本里留下任何痕迹。
  *
- * 需要的接口形状（已提给数据层，见 AGENTS.md 回话区）：
- * ```kotlin
- * suspend fun void(journalId: String): Boolean
- * ```
- * 拿到之后在 [AutoConfirmModule] 换绑定即可，界面一行都不用改。
+ * [isAvailable] 为 false 时**不渲染按钮**——显示一个点不动的按钮比不显示更糟。
  */
 interface AutoEntryUndo {
-    /** 有没有撤销能力。**没有就不渲染按钮**——显示一个点不动的按钮比不显示更糟。 */
+    /** 有没有撤销能力。 */
     val isAvailable: Boolean
 
     /** 成功返回 true；false 表示没撤销成功，界面要如实告诉用户。 */
     suspend fun undo(journalId: String): Boolean
 }
 
-/** 数据层还没提供作废接口时的占位。 */
+/**
+ * 按凭证 id 删除。**级联**清掉分录与明细（实体上是 `ON DELETE CASCADE`），
+ * 三张表的删除在同一个事务里——不存在"凭证没了分录还在"的中间态。
+ *
+ * 用的是数据层已有的 DAO，不越界改 `core` 下的代码。日后数据层若收拢成
+ * `LedgerRepository.delete`，换绑定即可，界面一行都不用改。
+ */
+@Singleton
+class DbAutoEntryUndo @Inject constructor(
+    private val database: LedgerDatabase,
+) : AutoEntryUndo {
+
+    override val isAvailable: Boolean = true
+
+    override suspend fun undo(journalId: String): Boolean = try {
+        database.withTransaction {
+            val existing = database.journalDao().findById(journalId)
+            if (existing == null) {
+                false
+            } else {
+                // 明细先删再删凭证；分录靠外键级联，和凭证同进退
+                database.journalItemDao().deleteByJournal(journalId)
+                database.journalDao().deleteById(journalId)
+                true
+            }
+        }
+    } catch (_: Exception) {
+        false
+    }
+}
+
+/** 数据层还没提供删除接口时的占位。 */
 object UnavailableAutoEntryUndo : AutoEntryUndo {
     override val isAvailable: Boolean = false
 
     override suspend fun undo(journalId: String): Boolean = false
 }
+
+/**
+ * 撤销之后提示条与错误文案怎么变。**纯函数**，所以能直接单测：
+ * 成功就收掉提示条；失败要留下提示条但收起撤销按钮，并如实报错。
+ */
+fun AutoSavedNotice.afterUndo(success: Boolean): Pair<AutoSavedNotice?, String?> =
+    if (success) {
+        null to null
+    } else {
+        copy(undoAvailable = false) to "撤销没成功，这笔还在账本里"
+    }
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -100,5 +138,5 @@ object AutoConfirmModule {
 
     @Provides
     @Singleton
-    fun provideAutoEntryUndo(): AutoEntryUndo = UnavailableAutoEntryUndo
+    fun provideAutoEntryUndo(impl: DbAutoEntryUndo): AutoEntryUndo = impl
 }

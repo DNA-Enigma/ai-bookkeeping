@@ -80,6 +80,12 @@ data class DraftCard(
     val place: String = "",
     /** 小票明细，纯描述，不参与记账。 */
     val items: List<ItemLine> = emptyList(),
+    /**
+     * 分字段置信度里最低的字段名，确认卡上提示「重点核对它」。
+     * 服务端当前不产出 `field_confidence`，所以这个值现在多半是 null——
+     * **没有就不提示**，不拿整体置信度冒充。
+     */
+    val weakestField: String? = null,
 ) {
     /**
      * 达阈值才算高置信。阈值由 [AutoConfirmSettings] 提供、用户在设置页可调，
@@ -277,10 +283,14 @@ class AddEntryViewModel @Inject constructor(
                     todayEpochDay = today,
                     expenseCategories = current.expenseCategories,
                     incomeCategories = current.incomeCategories,
+                    fieldConfidence = outcome.fieldConfidence,
                 )
                 // 路线图 P0-a：高置信直接入账，低置信（或拿不到置信度）才走确认卡。
+                // 置信度以 Completed 上的为准（契约字段）；拿不到就退回 fields 里的——
+                // 两处都没有就是 null，照走确认，不猜。
+                val confidence = outcome.confidence ?: card.confidence
                 // 前提条件不满足时也退回确认卡——自动路径不该有静默失败。
-                if (ConfidenceGate.canAutoPost(card.confidence, current.autoConfirmThreshold) &&
+                if (ConfidenceGate.canAutoPost(confidence, current.autoConfirmThreshold) &&
                     canAutoPost(card, current)
                 ) {
                     autoConfirm(card, outcome.taskId, current)
@@ -566,16 +576,14 @@ class AddEntryViewModel @Inject constructor(
         if (journalId == null || !notice.undoAvailable) return
         viewModelScope.launch {
             val ok = runCatching { autoEntryUndo.undo(journalId) }.getOrDefault(false)
+            val (nextNotice, error) = notice.afterUndo(ok)
             _state.update {
-                if (ok) {
-                    // 撤销后回到记账输入页：把刚填的原始文本也清掉，避免误以为还没提交
-                    it.copy(autoSaved = null, parseError = null)
-                } else {
-                    it.copy(
-                        autoSaved = notice.copy(undoAvailable = false),
-                        parseError = "撤销没成功，这笔还在账本里",
-                    )
-                }
+                it.copy(
+                    autoSaved = nextNotice,
+                    parseError = error,
+                    // 撤销成功后回到记账输入页：把刚填的原始文本也清掉，避免误以为还没提交
+                    rawText = if (ok) "" else it.rawText,
+                )
             }
         }
     }

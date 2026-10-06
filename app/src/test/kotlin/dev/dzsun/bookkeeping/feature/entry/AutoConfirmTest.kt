@@ -5,6 +5,7 @@ import dev.dzsun.bookkeeping.core.network.ReceiptFields
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -126,5 +127,74 @@ class AutoConfirmTest {
         assertTrue(localClarification(listOf(card(0.6f)), threshold) != null)
         // 拿不到置信度的卡片同样要问
         assertTrue(localClarification(listOf(card(null)), threshold) != null)
+    }
+
+    // ------------------------------------------------------------ 撤销
+
+    private fun notice(
+        journalId: String? = "j1",
+        undoAvailable: Boolean = true,
+    ) = AutoSavedNotice(journalId = journalId, label = "¥38.50 星巴克", undoAvailable = undoAvailable)
+
+    @Test
+    fun `撤销成功后提示条收掉且没有错误`() {
+        val (next, error) = notice().afterUndo(success = true)
+        assertNull(next)
+        assertNull(error)
+    }
+
+    @Test
+    fun `撤销失败时如实报错并收起撤销按钮`() {
+        val (next, error) = notice().afterUndo(success = false)
+        // 提示条要留着——用户得知道这笔还在
+        assertNotNull(next)
+        assertFalse(next!!.undoAvailable)
+        assertEquals("撤销没成功，这笔还在账本里", error)
+    }
+
+    @Test
+    fun `不可撤销的占位不宣称有能力`() {
+        // 没有删除接口时宁可不摆按钮，也不摆一个点不动的
+        assertFalse(UnavailableAutoEntryUndo.isAvailable)
+        assertFalse(kotlinx.coroutines.runBlocking { UnavailableAutoEntryUndo.undo("j1") })
+    }
+
+    // ------------------------------------------------------------ 分字段置信度提示
+
+    @Test
+    fun `分字段置信度取最低的那个字段`() {
+        assertEquals("merchant", weakestFieldName(mapOf("amount" to 0.95f, "merchant" to 0.4f)))
+        assertEquals("amount", weakestFieldName(mapOf("amount" to 0.2f)))
+        assertNull(weakestFieldName(null))
+        assertNull(weakestFieldName(emptyMap()))
+    }
+
+    @Test
+    fun `没有分字段置信度时卡片上不编造核对项`() {
+        val draft = ReceiptFields(
+            amount = JsonPrimitive("12.34"),
+            currency = "CNY",
+            confidence = 0.4,
+        ).toDraftCard(
+            id = "t3",
+            todayEpochDay = 1L,
+            expenseCategories = emptyList(),
+            incomeCategories = emptyList(),
+        )
+        assertNull(draft.weakestField)
+
+        val withFields = ReceiptFields(
+            amount = JsonPrimitive("12.34"),
+            currency = "CNY",
+            confidence = 0.4,
+            fieldConfidence = mapOf("amount" to 0.9f, "category" to 0.3f),
+        ).toDraftCard(
+            id = "t4",
+            todayEpochDay = 1L,
+            expenseCategories = emptyList(),
+            incomeCategories = emptyList(),
+            fieldConfidence = mapOf("amount" to 0.9f, "category" to 0.3f),
+        )
+        assertEquals("category", withFields.weakestField)
     }
 }

@@ -349,7 +349,7 @@ fun ParsedCard(
             // 低置信（或压根拿不到置信度）才走到这张卡，明说一句让用户知道该核对什么。
             // 高置信的走的是自动入账，不会出现在这里。
             if (!card.isHighConfidence(confidenceThreshold)) {
-                LowConfidenceHint()
+                LowConfidenceHint(weakestField = card.weakestField)
                 Spacer(Modifier.height(4.dp))
             }
 

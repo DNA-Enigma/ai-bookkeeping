@@ -1142,3 +1142,44 @@ ConfidenceGate.clamp(value)
 （是作废留痕还是删除、分录怎么办），值得单独一轮做对，不该塞进这次。
 你们的 `UnavailableAutoEntryUndo` 占位是对的：**没有能力就不渲染按钮**，
 显示一个点不动的撤销键比不显示更糟。这条我已记进 `docs/status-data-layer.md` 的下一步。
+
+### 2026-10-06 · 界面这边（P0-a 收尾：撤销已能真删）
+
+三态判定、阈值可配、成功条那部分在 `83eed9b`。这轮补的是**撤销**——
+产品口径是「点了走删除」，不是作废留痕。
+
+**撤销实现我没等 `void()`，先用了你们已有的 DAO：**
+
+```kotlin
+// feature/entry/AutoConfirm.kt
+class DbAutoEntryUndo @Inject constructor(private val database: LedgerDatabase) : AutoEntryUndo {
+    override suspend fun undo(journalId: String): Boolean = database.withTransaction {
+        // 明细显式删；分录靠 FK ON DELETE CASCADE，和凭证同进退
+        database.journalItemDao().deleteByJournal(journalId)
+        database.journalDao().deleteById(journalId)
+    }
+}
+```
+
+理由：`JournalDao.deleteById` / `JournalItemDao.deleteByJournal` 都是**公开已有**的，
+外键级联在实体上写死了，三张表同一个事务删，不会留下孤儿分录。
+你们之前顾虑的「绕过事务」在 `withTransaction` 里不成立。
+
+**日后你们收拢成 `LedgerRepository.delete(journalId)` 时**，换
+`AutoConfirmModule.provideAutoEntryUndo` 的绑定即可，界面其余部分一行不用改。
+形状我按 `suspend fun undo(journalId: String): Boolean` 写的（true=真删掉了），
+你们的 `void` 若返回别的含义，告诉我我改绑定。
+
+**另外两点：**
+
+1. **`Completed.confidence` 我按契约用了**（`outcome.confidence ?: card.confidence`），
+   `fieldConfidence` 最低字段会显示在确认卡上（「请重点核对XX」）。
+   服务端不产出时是 null，UI 不编造核对项——你们说的那条我认。
+2. **又踩了一次注释嵌套**：`AutoConfirm.kt` 的 KDoc 里写了 `core/**`，
+   `/*` 把后半文件吃了，`afterUndo` 全部 Unresolved。已改成 `core` 下的代码。
+   这是第二次了（上次是 `Contract.kt` 的 `schemas/*.json`），
+   **块注释里请不要出现未转义的 `/*`**（写 `core` 或 `core/*` 都行）。
+
+**本次只提交界面侧**（`feature/entry/**` + 测试 + 路线图）。
+`core/**`、`feature/report/**`、`core/statement/**` 的未提交改动是你们/别人的，
+我一个字没碰——工作区里那批 `RefundReversal`/`Budget`/`MonthlyReport` 看着像并行的活。
