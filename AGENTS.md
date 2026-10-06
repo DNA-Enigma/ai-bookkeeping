@@ -75,14 +75,20 @@
 - `core/network`：调度层契约 DTO、`DispatcherClient`（含带 `Last-Event-ID` 的 SSE 重放）
 - 工具链与构建脚本
 
-### 阻塞：4 个编译错误，全在界面侧
-构建因此一直是红的（数据层本身编译是干净的——编译器只报这 4 个）。
+### 构建状态：绿（2026-10-06 17:10）
 
-| 位置 | 问题 | 修法 |
-|---|---|---|
-| `AppNavHost.kt:47` | `Icons.AutoMirrored.Outlined.List` 不存在 | 改成 `Icons.Outlined.List` |
-| `SettingsScreen.kt:15,133,206` | `Icons.AutoMirrored.Filled.ChevronRight` 不存在 | 改成 `Icons.Filled.ChevronRight` |
-| `AddEntryScreen.kt:294` | `card.isHighConfidence`，但 `card` 是 `DraftCard`，没这个字段 | 给 `DraftCard` 加置信度字段（`AiParser.kt` 的 `ParsedEntry` 里有），或在映射时带上 |
+`tools/build.sh :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**。
+
+- 单元测试 **21 个全过**（`MoneyTest` 13 + `JournalDraftTest` 8，0 失败 0 跳过）
+- 产出 `app-debug.apk`（19.9 MB）
+- 之前那 4 个界面侧编译错误已由界面这边修完
+
+数据层的两条核心规则至此有据可依：
+**金额用整数最小单位不产生浮点误差**（`0.1+0.2`、累加一千次一分钱、银行家舍入、拆分守恒）；
+**复式不变式在类型层面无法违反**（不平的凭证、单条分录、币种混用均被拒绝）。
+
+尚未验证的：`core/network` 只通过了编译，**没有对着真实调度层跑过**。
+本地 `smart-dispatcher` 联调属于 M2。
 
 ### 需要对齐后端（`smart-dispatcher`）的契约缺口
 1. **`bookkeeping.ReceiptFields` / `Merchant` / `DedupeResult` / `LedgerEntry` 被引用但从未定义**——
