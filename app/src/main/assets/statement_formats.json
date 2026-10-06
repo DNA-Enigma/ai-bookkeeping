@@ -1,0 +1,86 @@
+{
+  "_comment": "流水文件的格式定义。加一家银行 = 加一条，不改代码。列名是配置性的：各家不同，且会随账单版本变。",
+  "_verification": "⚠️ 下列列名来自检索结果推断，**尚未用真实账单逐字核对**。拿到真文件后应校正一次；alias 列表刻意写得宽松，就是为了容忍轻微差异。",
+  "version": 1,
+  "formats": [
+    {
+      "id": "wechat",
+      "display_name": "微信支付账单",
+      "header_markers": ["微信支付", "微信昵称", "交易单号"],
+      "encodings": ["UTF-8", "GBK"],
+      "columns": {
+        "time": ["交易时间", "交易日期", "时间"],
+        "type": ["交易类型", "业务类型"],
+        "counterparty": ["交易对方", "对方"],
+        "description": ["商品", "商品说明", "商品名称", "备注"],
+        "direction": ["收/支", "收支", "收/支类型"],
+        "amount": ["金额(元)", "金额（元）", "金额"],
+        "status": ["当前状态", "交易状态", "状态"],
+        "ref": ["交易单号", "交易号", "流水号"],
+        "merchant_ref": ["商户单号", "商家订单号"]
+      },
+      "direction_values": {
+        "expense": ["支出", "支"],
+        "income": ["收入", "收"]
+      },
+      "non_consumption_types": [
+        "转账", "微信红包", "红包", "群收款", "亲属卡",
+        "零钱通", "理财通", "信用卡还款", "零钱提现", "充值"
+      ],
+      "time_patterns": ["yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss", "yyyy-MM-dd HH:mm"]
+    },
+    {
+      "id": "alipay",
+      "display_name": "支付宝账单",
+      "header_markers": ["支付宝", "交易号", "商家订单号"],
+      "encodings": ["GBK", "UTF-8"],
+      "columns": {
+        "time": ["交易创建时间", "交易时间", "创建时间", "付款时间"],
+        "type": ["交易类型", "业务类型", "类型"],
+        "counterparty": ["交易对方", "对方", "商户名称"],
+        "description": ["商品名称", "商品说明", "商品", "备注"],
+        "direction": ["收/支", "收支"],
+        "amount": ["金额（元）", "金额(元)", "金额"],
+        "status": ["交易状态", "当前状态", "状态"],
+        "ref": ["交易号", "交易单号", "流水号"],
+        "merchant_ref": ["商家订单号", "商户单号"]
+      },
+      "direction_values": {
+        "expense": ["支出", "支"],
+        "income": ["收入", "收"]
+      },
+      "non_consumption_types": [
+        "转账", "红包", "余额宝-单次转入", "余额宝-单次转出",
+        "余额宝-自动转入", "余额宝-自动转出", "花呗还款", "信用卡还款",
+        "提现", "充值", "亲情卡"
+      ],
+      "time_patterns": ["yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss", "yyyy-MM-dd HH:mm"]
+    },
+    {
+      "id": "bank_generic",
+      "display_name": "银行流水（通用）",
+      "header_markers": ["交易日期", "摘要", "对方户名", "借贷标志"],
+      "encodings": ["GBK", "UTF-8"],
+      "columns": {
+        "time": ["交易日期", "交易日", "记账日期", "日期"],
+        "type": ["交易类型", "摘要", "业务摘要", "交易摘要"],
+        "counterparty": ["对方户名", "对方账户名", "交易对手", "对方名称", "商户名称"],
+        "description": ["摘要", "附言", "备注", "用途"],
+        "direction": ["收/支", "借贷标志", "借贷方向", "收支标志"],
+        "amount": ["交易金额", "发生额", "金额"],
+        "status": ["交易状态", "状态"],
+        "ref": ["交易流水号", "流水号", "交易序号", "凭证号"],
+        "merchant_ref": ["订单号", "商户订单号"]
+      },
+      "direction_values": {
+        "expense": ["支出", "支", "借", "付出", "转出"],
+        "income": ["收入", "收", "贷", "存入", "转入"]
+      },
+      "non_consumption_types": ["转账", "还款", "理财", "基金", "定期", "结息"],
+      "time_patterns": [
+        "yyyy-MM-dd HH:mm:ss", "yyyy/MM/dd HH:mm:ss",
+        "yyyyMMdd", "yyyy-MM-dd", "yyyy/MM/dd"
+      ]
+    }
+  ]
+}
