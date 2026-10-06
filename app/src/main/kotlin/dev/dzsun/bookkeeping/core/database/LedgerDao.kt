@@ -41,6 +41,9 @@ interface AccountDao {
     @Query("SELECT * FROM account WHERE id = :id")
     suspend fun findById(id: String): AccountEntity?
 
+    @Query("SELECT name FROM account WHERE id = :id")
+    suspend fun nameOf(id: String): String?
+
     @Query("SELECT * FROM account WHERE type IN (:types) AND archived = 0 ORDER BY sortOrder, name")
     fun observeByTypes(types: List<AccountType>): Flow<List<AccountEntity>>
 
@@ -113,6 +116,32 @@ interface JournalDao {
         """,
     )
     suspend fun findByExternalRef(source: String, ref: String): JournalEntity?
+
+    /**
+     * 这个商户以前被归到哪个分类——**用用户自己的历史，不用模型**。
+     *
+     * 导入流水时最麻烦的是流水里没有分类。让模型给几百行逐条分类既贵又慢，
+     * 而用户早就用行为回答过这个问题：他以前把「星巴克咖啡」归到餐饮，
+     * 这次也该是餐饮。取用得最多的那个。
+     *
+     * 只做**精确匹配**商户名。模糊匹配（「星巴克咖啡（国贸店）」与「（望京店）」）
+     * 留待以后——先做对，再做广。
+     */
+    @Query(
+        """
+        SELECT p.accountId
+        FROM journal j
+        JOIN posting p ON p.journalId = j.id
+        JOIN account a ON a.id = p.accountId
+        WHERE a.type IN ('EXPENSE', 'INCOME')
+          AND j.payee = :payee
+          AND j.status != 'VOID'
+        GROUP BY p.accountId
+        ORDER BY COUNT(*) DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun mostUsedCategoryFor(payee: String): String?
 
     /**
      * 找可能与「金额 [amountMinor]、日期 [anchorEpochDay] 前后 [windowDays] 天」重复的既有账目。

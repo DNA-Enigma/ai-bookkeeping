@@ -169,6 +169,17 @@ class LedgerRepository @Inject constructor(
     suspend fun itemsOf(journalId: String): List<JournalItemEntity> =
         database.journalItemDao().findByJournal(journalId)
 
+    /**
+     * 这个商户以前被归到哪个分类——**用用户自己的历史，不用模型**。
+     *
+     * 导入流水时流水里没有分类，而让模型逐条分类既贵又慢。用户其实早就用行为
+     * 回答过：他以前把「星巴克咖啡」归到餐饮，这次也该是餐饮。
+     */
+    suspend fun categoryForMerchant(payee: String): String? =
+        database.journalDao().mostUsedCategoryFor(payee)
+
+    suspend fun accountName(id: String): String? = database.accountDao().nameOf(id)
+
     companion object {
         /**
          * 去重的时间窗，前后各 3 天。
