@@ -37,7 +37,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import dev.dzsun.bookkeeping.feature.discover.DiscoverScreen
 import dev.dzsun.bookkeeping.feature.entry.AddEntrySheet
+import dev.dzsun.bookkeeping.feature.ledger.EntryDetailScreen
 import dev.dzsun.bookkeeping.feature.ledger.LedgerScreen
 import dev.dzsun.bookkeeping.feature.settings.SettingsScreen
 import dev.dzsun.bookkeeping.feature.stats.StatsScreen
@@ -47,6 +49,9 @@ object Routes {
     const val STATS = "stats"
     const val DISCOVER = "discover"
     const val SETTINGS = "settings"
+    const val ENTRY_DETAIL = "entry/{journalId}"
+
+    fun entryDetail(journalId: String) = "entry/$journalId"
 }
 
 private data class TabSpec(
@@ -66,6 +71,7 @@ private val tabs = listOf(
 /**
  * 五宫格底栏：记账 · 报表 · 〔+〕· 发现 · 设置。
  * 中央 + 是「记一笔」半屏面板，不占路由。
+ * 详情页（entry/{id}）不显示底栏——它是一条压栈的子页面。
  */
 @Composable
 fun AppNavHost(onSignOut: () -> Unit = {}) {
@@ -73,29 +79,32 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     var showAddSheet by remember { mutableStateOf(false) }
+    val isDetail = currentRoute?.startsWith("entry/") == true
 
     Scaffold(
         bottomBar = {
-            NavigationBar {
-                // 左侧两个
-                tabs.take(2).forEach { tab ->
-                    TabItem(tab, currentRoute, navController)
-                }
-                // 中央 +
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    FloatingActionButton(
-                        onClick = { showAddSheet = true },
-                        modifier = Modifier.size(58.dp),
-                        shape = CircleShape,
-                        containerColor = dev.dzsun.bookkeeping.core.designsystem.BrandBlue,
-                        contentColor = androidx.compose.ui.graphics.Color.White,
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = "记一笔")
+            if (!isDetail) {
+                NavigationBar {
+                    // 左侧两个
+                    tabs.take(2).forEach { tab ->
+                        TabItem(tab, currentRoute, navController)
                     }
-                }
-                // 右侧两个
-                tabs.drop(2).forEach { tab ->
-                    TabItem(tab, currentRoute, navController)
+                    // 中央 +
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        FloatingActionButton(
+                            onClick = { showAddSheet = true },
+                            modifier = Modifier.size(58.dp),
+                            shape = CircleShape,
+                            containerColor = dev.dzsun.bookkeeping.core.designsystem.BrandBlue,
+                            contentColor = androidx.compose.ui.graphics.Color.White,
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "记一笔")
+                        }
+                    }
+                    // 右侧两个
+                    tabs.drop(2).forEach { tab ->
+                        TabItem(tab, currentRoute, navController)
+                    }
                 }
             }
         },
@@ -106,24 +115,31 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
             modifier = Modifier.padding(padding),
         ) {
             composable(Routes.LEDGER) {
-                LedgerScreen(onAddEntry = { showAddSheet = true })
+                LedgerScreen(
+                    onAddEntry = { showAddSheet = true },
+                    onEntryClick = { journalId ->
+                        navController.navigate(Routes.entryDetail(journalId))
+                    },
+                )
             }
             composable(Routes.STATS) {
                 StatsScreen()
             }
             composable(Routes.DISCOVER) {
-                // 发现：投资问诊对话流，后续接入
-                androidx.compose.foundation.layout.Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("发现 · AI 问诊即将上线")
-                }
+                DiscoverScreen()
             }
             composable(Routes.SETTINGS) {
                 SettingsScreen()
+            }
+            composable(
+                route = Routes.ENTRY_DETAIL,
+                arguments = listOf(
+                    androidx.navigation.navArgument("journalId") {
+                        type = androidx.navigation.NavType.StringType
+                    },
+                ),
+            ) {
+                EntryDetailScreen(onBack = { navController.popBackStack() })
             }
         }
     }
