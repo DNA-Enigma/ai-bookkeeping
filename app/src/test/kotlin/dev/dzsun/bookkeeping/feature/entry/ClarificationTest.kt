@@ -1,6 +1,8 @@
 package dev.dzsun.bookkeeping.feature.entry
 
 import dev.dzsun.bookkeeping.core.network.FieldEdit
+import dev.dzsun.bookkeeping.core.network.ReceiptFields
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -68,5 +70,44 @@ class ClarificationTest {
         assertEquals(EntryKind.EXPENSE, kindFromOptionId("expense"))
         assertEquals(EntryKind.INCOME, kindFromOptionId("income"))
         assertNull(kindFromOptionId("whatever"))
+    }
+
+    @Test
+    fun `receipt fields map to draft card without touching floats`() {
+        val fields = ReceiptFields(
+            amount = JsonPrimitive("12.34"),
+            currency = "CNY",
+            merchant = "星巴克",
+            direction = "income",
+            confidence = 0.95,
+            notes = "拿铁",
+            datetime = "2026-10-06T12:00:00",
+        )
+        val draft = fields.toDraftCard(
+            id = "t1",
+            todayEpochDay = 999L,
+            expenseCategories = emptyList(),
+            incomeCategories = emptyList(),
+        )
+        assertEquals(EntryKind.INCOME, draft.kind)
+        assertEquals("12.34", draft.amountText)
+        assertEquals("星巴克", draft.payee)
+        assertEquals(0.95f, draft.confidence)
+        assertTrue(draft.isHighConfidence)
+    }
+
+    @Test
+    fun `failed extraction falls back to today and empty amount`() {
+        val fields = ReceiptFields(amount = null, currency = null, confidence = 0.2)
+        val draft = fields.toDraftCard(
+            id = "t2",
+            todayEpochDay = 42L,
+            expenseCategories = emptyList(),
+            incomeCategories = emptyList(),
+        )
+        assertEquals(EntryKind.EXPENSE, draft.kind)
+        assertEquals("", draft.amountText)
+        assertEquals(42L, draft.dateEpochDay)
+        assertTrue(!draft.isHighConfidence)
     }
 }

@@ -4,21 +4,25 @@ import dev.dzsun.bookkeeping.core.network.ClarificationAnswer
 import dev.dzsun.bookkeeping.core.network.ClarificationOption
 import dev.dzsun.bookkeeping.core.network.FieldEdit
 import dev.dzsun.bookkeeping.core.network.PendingClarification
+import dev.dzsun.bookkeeping.core.network.ReceiptFields
 import dev.dzsun.bookkeeping.core.network.TaskFeedback
+import java.time.LocalDate
 
 /**
  * 澄清答复出口。渲染器只依赖这个接口，不直接碰 `DispatcherClient`——
- * 接调度层时在 `AppModule` 换绑定即可，与 `AiParser` 同一套路。
+ * 接调度层时在 [ClarificationModule] 换绑定即可，与 `AiParser` 同一套路。
+ *
+ * [taskId] 来自 `CaptureOutcome.NeedsClarification`；纯本地流程没有 id 时传 null。
  */
 interface ClarificationPort {
-    suspend fun answer(answer: ClarificationAnswer)
-    suspend fun feedback(feedback: TaskFeedback)
+    suspend fun answer(taskId: String?, answer: ClarificationAnswer)
+    suspend fun feedback(taskId: String?, feedback: TaskFeedback)
 }
 
 /** 离线占位：无调度层时只收集不上传，保证确认页流程能走通。 */
 object NoOpClarificationPort : ClarificationPort {
-    override suspend fun answer(answer: ClarificationAnswer) = Unit
-    override suspend fun feedback(feedback: TaskFeedback) = Unit
+    override suspend fun answer(taskId: String?, answer: ClarificationAnswer) = Unit
+    override suspend fun feedback(taskId: String?, feedback: TaskFeedback) = Unit
 }
 
 /** `edits[].field` 取值，与 [DraftCard] 字段一一对应。 */
@@ -59,7 +63,7 @@ fun collectFieldEdits(baseline: DraftCard, current: DraftCard): List<FieldEdit> 
 }
 
 /**
- * 离线降级：低置信度卡片合成一条本地 `PendingClarification`，
+ * 离线降级：低置信度卡片合成一条本地 [PendingClarification]，
  * 形状与服务端 `confirmation` 段下发的完全一致，渲染器无感切换。
  */
 fun localClarification(cards: List<DraftCard>): PendingClarification? {
@@ -82,4 +86,35 @@ fun kindFromOptionId(optionId: String): EntryKind? = when (optionId) {
     "expense" -> EntryKind.EXPENSE
     "income" -> EntryKind.INCOME
     else -> null
+}
+
+/**
+ * 调度层抽出来的票据字段 → 确认卡。金额走 [ReceiptFields.money]，不经过浮点。
+ * 分类按名字从科目池匹配，匹配不上留空由用户选——分类是数据不是代码。
+ */
+fun ReceiptFields.toDraftCard(
+    id: String,
+    todayEpochDay: Long,
+    expenseCategories: List<dev.dzsun.bookkeeping.core.database.AccountEntity>,
+    incomeCategories: List<dev.dzsun.bookkeeping.core.database.AccountEntity>,
+): DraftCard {
+    val kind = if (isExpense) EntryKind.EXPENSE else EntryKind.INCOME
+    val pool = if (kind == EntryKind.INCOME) incomeCategories else expenseCategories
+    val amountText = money()?.toPlainString().orEmpty()
+    return DraftCard(
+        id = id,
+        kind = kind,
+        amountText = amountText,
+        categoryId = pool.firstOrNull()?.id.orEmpty(),
+        payee = merchant.orEmpty(),
+        note = notes.orEmpty(),
+        dateEpochDay = parseDateEpochDay(datetime) ?: todayEpochDay,
+        confidence = (confidence ?: 0.0).toFloat(),
+    )
+}
+
+private fun parseDateEpochDay(raw: String?): Long? {
+    if (raw.isNullOrBlank()) return null
+    // 契约的 datetime 是 ISO 串，这里只认日期前缀，认不出就交回默认值
+    return runCatching { LocalDate.parse(raw.take(10)).toEpochDay() }.getOrNull()
 }

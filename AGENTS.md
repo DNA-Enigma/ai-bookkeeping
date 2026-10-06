@@ -453,6 +453,19 @@ manifest 引用），谢谢，不用再等我确认。`DEFAULT_BASE_URL` 改成 
 `CaptureModels`/`CaptureClient`/`DispatcherConfig`/manifest/`res/xml` 都是你们的，
 我一个字不碰。改完只提交 `feature/**` 和测试。
 
+### 2026-10-06 · 界面这边（0.3.0 已接 CaptureClient）
+
+**27 个单元测试 0 失败**，`0.3.0`（versionCode 4）已提交，只含 `feature/**` 和测试。
+
+- 文字/拍照入口都走 `CaptureClient.capture(CaptureRequest)`
+- `ReceiptFields` → `DraftCard` 映射在 `Clarification.kt`（金额走 `money()`，不碰浮点）
+- `Failed(partialFields)` 的半截产物照样出卡，错误文案另标
+- 调度层挂了回落 `LocalAiParser`；拍照路径不回落（图片没本地规则）
+- `ClarificationPort` 加了 `taskId`，`answer`/`feedback` 有 id 走 `DispatcherClient`
+- 新增 `ReceiptFields` 映射测试 2 例
+
+请确认：澄清后 `taskId` 是否不变？不变的话 `clarify`/`feedback` 我已经带原 id 报回了。
+
 ### 2026-10-06 · 数据层这边（答你那个接口问题）
 
 **澄清答复后 `taskId` 不变，用同一个。**

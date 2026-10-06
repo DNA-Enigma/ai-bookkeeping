@@ -9,9 +9,14 @@ import dev.dzsun.bookkeeping.core.database.JournalSource
 import dev.dzsun.bookkeeping.core.ledger.JournalDraft
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import dev.dzsun.bookkeeping.core.money.Money
+import dev.dzsun.bookkeeping.core.network.CaptureClient
+import dev.dzsun.bookkeeping.core.network.CaptureOutcome
+import dev.dzsun.bookkeeping.core.network.CaptureRequest
 import dev.dzsun.bookkeeping.core.network.ClarificationAnswer
 import dev.dzsun.bookkeeping.core.network.FieldEdit
+import dev.dzsun.bookkeeping.core.network.MediaPayload
 import dev.dzsun.bookkeeping.core.network.PendingClarification
+import dev.dzsun.bookkeeping.core.network.ReceiptFields
 import dev.dzsun.bookkeeping.core.network.TaskFeedback
 import dev.dzsun.bookkeeping.core.platform.Clock
 import javax.inject.Inject
@@ -55,6 +60,8 @@ data class AddEntryUiState(
     val allSaved: Boolean = false,
     /** 服务端或本地合成的澄清；非空时确认页优先渲染它。 */
     val pendingClarification: PendingClarification? = null,
+    /** `CaptureOutcome.NeedsClarification` 带来的任务 id，`clarify`/`feedback` 要用。 */
+    val activeTaskId: String? = null,
     /** 用户相对解析基线的改动，入账时按 `edits[]` 回报。 */
     val fieldEdits: List<FieldEdit> = emptyList(),
     // —— 手动模式 ——
@@ -96,6 +103,7 @@ class AddEntryViewModel @Inject constructor(
     private val clock: Clock,
     private val parser: AiParser,
     private val clarificationPort: ClarificationPort,
+    private val captureClient: CaptureClient,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AddEntryUiState(dateEpochDay = clock.today().toEpochDay()))
@@ -139,8 +147,22 @@ class AddEntryViewModel @Inject constructor(
     }
 
     fun onPhotoClick() {
-        // 拍照/截图识别同理，等 AI 接口就绪后接票据 OCR。
+        // 拍照入口先保留；拿到字节后走 onPhotoCaptured，由 Activity 侧接系统相机/相册
         _state.update { it.copy(parseError = "拍照识别即将上线，先试试文字或语音输入吧") }
+    }
+
+    /**
+     * 图片字节就绪后的真正入口。MIME 由调用方给出——契约只收 jpeg/png/webp，
+     * HEIF 得先在调用方转成 JPEG。
+     */
+    fun onPhotoCaptured(bytes: ByteArray, mime: String) {
+        _state.update { it.copy(isParsing = true, parseError = null, allSaved = false) }
+        viewModelScope.launch {
+            runCapture(
+                request = CaptureRequest(intent = INTENT_RECEIPT, text = null, media = MediaPayload(bytes, mime)),
+                offlineFallback = false,
+            )
+        }
     }
 
     fun parseNow() {
@@ -151,41 +173,116 @@ class AddEntryViewModel @Inject constructor(
         }
         _state.update { it.copy(isParsing = true, parseError = null, allSaved = false) }
         viewModelScope.launch {
-            val parsed = runCatching { parser.parse(raw) }
-                .getOrElse {
-                    _state.update { it.copy(isParsing = false, parseError = it.parseError ?: "解析失败，换种说法试试") }
-                    return@launch
+            runCapture(
+                request = CaptureRequest(intent = INTENT_RECEIPT, text = raw),
+                offlineFallback = true,
+            )
+        }
+    }
+
+    /**
+     * 调度层优先，失败回落 [LocalAiParser]。
+     * `offlineFallback` 为 false 时（拍照路径）失败就如实报错——图片没有本地规则可退。
+     */
+    private suspend fun runCapture(request: CaptureRequest, offlineFallback: Boolean) {
+        val today = clock.today().toEpochDay()
+        val current = _state.value
+        val outcome = runCatching { captureClient.capture(request) }
+            .getOrElse { error ->
+                if (!offlineFallback) {
+                    _state.update { it.copy(isParsing = false, parseError = error.message ?: "识别失败") }
+                    return
                 }
-            if (parsed.isEmpty()) {
-                _state.update {
-                    it.copy(isParsing = false, parseError = "没听懂金额，试试「午饭 18 元」这样的说法")
-                }
-                return@launch
+                parseOffline(request.text.orEmpty(), today, current)
+                return
             }
-            val today = clock.today().toEpochDay()
-            val current = _state.value
-            val cards = parsed.map { p ->
-                DraftCard(
-                    id = p.id,
-                    kind = p.kind,
-                    amountText = p.amountText,
-                    categoryId = matchCategoryId(p, current),
-                    payee = p.payee,
-                    note = p.note,
-                    dateEpochDay = today + p.dateOffsetDays,
-                    confidence = p.confidence,
+
+        when (outcome) {
+            is CaptureOutcome.Completed -> {
+                val card = outcome.fields.toDraftCard(
+                    id = "capture-${outcome.taskId}",
+                    todayEpochDay = today,
+                    expenseCategories = current.expenseCategories,
+                    incomeCategories = current.incomeCategories,
                 )
+                applyCards(listOf(card), taskId = outcome.taskId, clarification = null)
             }
-            baselines.clear()
-            cards.forEach { baselines[it.id] = it }
+
+            is CaptureOutcome.NeedsClarification -> {
+                // 已抽出的字段先出卡，澄清问题交给渲染器
+                val cards = listOfNotNull(
+                    outcome.fields?.toDraftCard(
+                        id = "capture-${outcome.taskId}",
+                        todayEpochDay = today,
+                        expenseCategories = current.expenseCategories,
+                        incomeCategories = current.incomeCategories,
+                    ),
+                )
+                applyCards(cards, taskId = outcome.taskId, clarification = outcome.clarification)
+            }
+
+            is CaptureOutcome.Failed -> {
+                // 契约要求保留已完成节点的产物，别让用户白拍
+                val partial = outcome.partialFields?.toDraftCard(
+                    id = "partial-${outcome.taskId}",
+                    todayEpochDay = today,
+                    expenseCategories = current.expenseCategories,
+                    incomeCategories = current.incomeCategories,
+                )
+                val message = outcome.problem?.detail ?: outcome.problem?.title ?: "识别失败"
+                if (partial != null) {
+                    applyCards(listOf(partial), taskId = outcome.taskId, clarification = null, error = message)
+                } else {
+                    _state.update { it.copy(isParsing = false, parseError = message) }
+                }
+            }
+        }
+    }
+
+    private suspend fun parseOffline(raw: String, today: Long, current: AddEntryUiState) {
+        val parsed = runCatching { parser.parse(raw) }
+            .getOrElse {
+                _state.update { it.copy(isParsing = false, parseError = "解析失败，换种说法试试") }
+                return
+            }
+        if (parsed.isEmpty()) {
             _state.update {
-                it.copy(
-                    isParsing = false,
-                    cards = cards,
-                    fieldEdits = emptyList(),
-                    pendingClarification = localClarification(cards),
-                )
+                it.copy(isParsing = false, parseError = "没听懂金额，试试「午饭 18 元」这样的说法")
             }
+            return
+        }
+        val cards = parsed.map { p ->
+            DraftCard(
+                id = p.id,
+                kind = p.kind,
+                amountText = p.amountText,
+                categoryId = matchCategoryId(p, current),
+                payee = p.payee,
+                note = p.note,
+                dateEpochDay = today + p.dateOffsetDays,
+                confidence = p.confidence,
+            )
+        }
+        applyCards(cards, taskId = null, clarification = localClarification(cards))
+    }
+
+    private fun applyCards(
+        cards: List<DraftCard>,
+        taskId: String?,
+        clarification: PendingClarification?,
+        error: String? = null,
+    ) {
+        baselines.clear()
+        cards.forEach { baselines[it.id] = it }
+        _state.update {
+            it.copy(
+                isParsing = false,
+                cards = cards,
+                fieldEdits = emptyList(),
+                pendingClarification = clarification,
+                activeTaskId = taskId,
+                parseError = error,
+            )
         }
     }
 
@@ -217,6 +314,11 @@ class AddEntryViewModel @Inject constructor(
         )
     }
 
+    private companion object {
+        /** 契约 taxonomy 里的意图串，拍票据/文字记账都走它。 */
+        const val INTENT_RECEIPT = "bookkeeping.capture_from_receipt"
+    }
+
     private fun updateCard(id: String, transform: (DraftCard) -> DraftCard) {
         _state.update { s ->
             val cards = s.cards.map { if (it.id == id) transform(it) else it }
@@ -231,11 +333,12 @@ class AddEntryViewModel @Inject constructor(
 
     /** 用户选定澄清选项后落地：本地合成的选项直接改卡片，服务端的回 `ClarificationAnswer`。 */
     fun onClarificationAnswer(optionId: String) {
-        val clarification = _state.value.pendingClarification ?: return
+        val current = _state.value
+        val clarification = current.pendingClarification ?: return
         val answer = ClarificationAnswer(
             questionId = clarification.questionId,
             optionId = optionId,
-            edits = _state.value.fieldEdits,
+            edits = current.fieldEdits,
         )
         // 本地合成的 kind 澄清：选项直接决定方向
         kindFromOptionId(optionId)?.let { kind ->
@@ -247,9 +350,10 @@ class AddEntryViewModel @Inject constructor(
                 s.copy(cards = cards, fieldEdits = recomputeEdits(cards))
             }
         }
+        val taskId = current.activeTaskId
         _state.update { it.copy(pendingClarification = null) }
         viewModelScope.launch {
-            runCatching { clarificationPort.answer(answer) }
+            runCatching { clarificationPort.answer(taskId, answer) }
         }
     }
 
@@ -304,6 +408,7 @@ class AddEntryViewModel @Inject constructor(
                     val edits = current.fieldEdits
                     runCatching {
                         clarificationPort.feedback(
+                            current.activeTaskId,
                             TaskFeedback(
                                 verdict = if (edits.isEmpty()) "confirmed" else "edited",
                                 edits = edits,
@@ -319,6 +424,7 @@ class AddEntryViewModel @Inject constructor(
                             rawText = "",
                             fieldEdits = emptyList(),
                             pendingClarification = null,
+                            activeTaskId = null,
                         )
                     }
                 },
