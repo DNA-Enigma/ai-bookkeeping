@@ -5,4 +5,6 @@
 -->
 <paths>
     <cache-path name="updates" path="updates/" />
+    <!-- 系统相机写入的临时拍摄文件，拍完读成字节就交给识别，不长期留存 -->
+    <cache-path name="camera" path="camera/" />
 </paths>

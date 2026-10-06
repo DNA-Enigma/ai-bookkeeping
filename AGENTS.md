@@ -706,3 +706,56 @@ fun observeMonthlyTotals(from: LocalDate, to: LocalDate): Flow<List<MonthlyTotal
 **另外提一句（不在这次范围内）**：`observeEntries()` 给账目列表页也是返回全表的。
 个人账本几千条还能接受，但更稳妥的是分页取近期。等真感觉到卡再说，不急着改。
 
+### 2026-10-06 · 界面这边（0.5.0：两个入口都接上了）
+
+统计也换成你们的 SQL 聚合了，`StatsViewModel` 那份未提交的改动一并进了这次提交。
+两个入口的落地情况：
+
+**【1】拍照/选图 —— 可以端到端验了。**
+
+新增 `feature/entry/PhotoCapture.kt`：
+
+- **相册**走 `PickVisualMedia`（系统照片选择器，不需要存储权限）
+- **相机**走 `TakePicture` + FileProvider（`cache/camera/` 已加进 `file_paths.xml`），
+  委托给系统相机应用，**不申请 `CAMERA` 权限**
+- **HEIF → JPEG 在客户端做**，规则是：先按**文件头嗅探**（`ContentResolver.getType`
+  不可信，FileProvider 按扩展名猜），落在 jpeg/png/webp 就原样走，
+  其他（HEIF/未知）一律 `Bitmap → JPEG`，长边压到 2048 再上传
+- 嗅探与归一化是纯函数，有单测（`PhotoCaptureTest` 6 个）
+
+入口有两处，你验哪边都行：
+
+| 入口 | 路径 |
+|---|---|
+| **记一笔面板**（主路径） | 首页右下 AI 球 / 中央 + → 标题栏相机图标 → 相册 / 拍一张 |
+| AI 记账页 | 同面板识别结果会出确认卡；`AddEntryScreen` 也留了「相册」「拍照」两个按钮 |
+
+识别结果**就在「记一笔」半屏面板里出确认卡**（金额/分类/商家/备注/日期都可改），
+不用另起路由。`Failed(partialFields)` 的半截产物照旧出卡，错误文案另标。
+识别失败时图片路径**不回落** `LocalAiParser`（图片没有本地规则可退），
+文案走 `onCaptureError`。
+
+**【2】在线更新 —— 设置页入口也接上了。**
+
+设置 → 关于 → **检查更新**。完整状态机都渲染了：
+
+`Idle → Checking → UpToDate / Available → Downloading(进度) → ReadyToInstall`
+以及 `NeedInstallPermission`（按钮拉起「安装未知应用」授权页，`ON_RESUME` 回来
+自动调 `onInstallPermissionGranted()` 接着装）和 `Error`（重试/忽略）。
+
+`ReadyToInstall` 那个「打开安装页」会再走一遍 `downloadAndInstall`——
+你们的 `download` 对已校验过的 APK 直接复用，所以重试不费流量。
+版本号改成读 `state.versionName`，不再写死。
+
+**【3】澄清空选项的自由文本**早就补了，你不用惦记。`ClarificationCard` 在
+`options: []` 时渲染 `OutlinedTextField`，按钮启用条件是 `freeText` 非空
+（`canAnswerClarification`），提交走 `ClarificationAnswer(answerId=null, freeText=…)`。
+单测 4 个盖着。
+
+**本次提交还包括**：`StatsViewModel` 换 `observeCategoryTotals` /
+`observeMonthlyTotals`（周期切换只改 `from`/`to`，不再全表进内存），
+`file_paths.xml` 加 `cache/camera/`，版本 **0.5.0**（versionCode 5）。
+
+**构建绿，40 个单元测试 0 失败**（新增 `PhotoCaptureTest` 6 个）。
+纯文本那条路按你们的 P0-1 仍然当不可用；截图/拍照路径不受影响，可以开验。
+

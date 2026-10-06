@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -175,7 +176,16 @@ private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
                         Spacer(Modifier.width(4.dp))
                         Text(if (state.isListening) "聆听中…" else "语音")
                     }
-                    OutlinedButton(onClick = viewModel::onPhotoClick) {
+                    val photoCapture = rememberPhotoCapture(
+                        onPhotoCaptured = viewModel::onPhotoCaptured,
+                        onPhotoError = viewModel::onCaptureError,
+                    )
+                    OutlinedButton(onClick = photoCapture::pickFromGallery) {
+                        Icon(Icons.Default.PhotoLibrary, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("相册")
+                    }
+                    OutlinedButton(onClick = photoCapture::takePhoto) {
                         Icon(Icons.Default.PhotoCamera, contentDescription = null)
                         Spacer(Modifier.width(4.dp))
                         Text("拍照")
@@ -282,7 +292,7 @@ private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ParsedCard(
+fun ParsedCard(
     card: DraftCard,
     categories: List<AccountEntity>,
     currency: String,

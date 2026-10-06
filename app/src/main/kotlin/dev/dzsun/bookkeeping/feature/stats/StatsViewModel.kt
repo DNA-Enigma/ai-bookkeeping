@@ -4,7 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.dzsun.bookkeeping.core.database.AccountType
-import dev.dzsun.bookkeeping.core.database.LedgerRow
+import dev.dzsun.bookkeeping.core.database.CategoryTotal
+import dev.dzsun.bookkeeping.core.database.MonthlyTotal
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import java.time.LocalDate
 import java.time.YearMonth
@@ -12,8 +13,11 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -53,6 +57,11 @@ data class StatsUiState(
     val isLoading: Boolean = true,
 )
 
+/**
+ * 统计只读 SQL 聚合投影（[LedgerRepository.observeCategoryTotals] / [LedgerRepository.observeMonthlyTotals]），
+ * 不再把整本账目装进内存再筛。切换周期只是把 `from`/`to` 传上去，
+ * 数据流自己会跟着日期区间重查。
+ */
 @HiltViewModel
 class StatsViewModel @Inject constructor(
     private val repository: LedgerRepository,
@@ -61,79 +70,80 @@ class StatsViewModel @Inject constructor(
     private val _state = MutableStateFlow(StatsUiState())
     val state: StateFlow<StatsUiState> = _state.asStateFlow()
 
-    private var allRows: List<LedgerRow> = emptyList()
     private var baseCurrency: String = "CNY"
 
     init {
         viewModelScope.launch {
-            val currency = repository.observeBaseCurrency().first().orEmpty().ifBlank { "CNY" }
-            baseCurrency = currency
-            combine(repository.observeEntries(), _state) { rows, s -> rows to s.period }
-                .collect { (rows, period) ->
-                    allRows = rows
-                    recompute(period)
-                }
+            baseCurrency = repository.observeBaseCurrency().first().orEmpty().ifBlank { "CNY" }
+            _state.update { it.copy(currency = baseCurrency) }
+            _state
+                .map { it.period }
+                .distinctUntilChanged()
+                .collectLatest { period -> observePeriod(period) }
         }
     }
 
     fun onPeriodChange(period: StatsPeriod) {
         _state.update { it.copy(period = period) }
-        recompute(period)
     }
 
-    private fun recompute(period: StatsPeriod) {
+    /** 周期内的分类合计 + 近 6 个月柱状——都是 SQL 侧 GROUP BY，界面只做展示映射。 */
+    private suspend fun observePeriod(period: StatsPeriod) {
         val today = LocalDate.now()
         val thisMonth = YearMonth.from(today)
         val startMonth = thisMonth.minusMonths(period.months.toLong() - 1)
-        val startDay = startMonth.atDay(1).toEpochDay()
-        val endDay = thisMonth.atEndOfMonth().toEpochDay()
+        val periodFrom = startMonth.atDay(1)
+        val periodTo = thisMonth.atEndOfMonth()
+        // 柱状图始终画近 6 个月，与周期切换无关
+        val barsFrom = thisMonth.minusMonths(5).atDay(1)
+        val barsTo = thisMonth.atEndOfMonth()
 
-        val inRange = allRows.filter { it.dateEpochDay in startDay..endDay }
-
-        val expenseRows = inRange.filter { it.categoryType == AccountType.EXPENSE }
-        val incomeRows = inRange.filter { it.categoryType == AccountType.INCOME }
-
-        val expenseTotal = expenseRows.sumOf { it.amountMinor }
-        val incomeTotal = incomeRows.sumOf { it.amountMinor }
-
-        val byCategory = expenseRows
-            .groupBy { it.categoryId }
-            .map { (id, rows) ->
-                val sum = rows.sumOf { it.amountMinor }
-                CategorySlice(
-                    categoryId = id,
-                    name = rows.first().categoryName,
-                    amountMinor = sum,
-                    ratio = if (expenseTotal == 0L) 0f else sum.toFloat() / expenseTotal,
+        combine(
+            repository.observeCategoryTotals(AccountType.EXPENSE, periodFrom, periodTo),
+            repository.observeCategoryTotals(AccountType.INCOME, periodFrom, periodTo),
+            repository.observeMonthlyTotals(barsFrom, barsTo),
+        ) { expenseCats, incomeCats, monthly ->
+            Triple(expenseCats, incomeCats, monthly)
+        }.collect { (expenseCats, incomeCats, monthly) ->
+            val expenseTotal = expenseCats.sumOf { it.amountMinor }
+            val incomeTotal = incomeCats.sumOf { it.amountMinor }
+            val byCategory = expenseCats.toCategorySlices(expenseTotal)
+            val bars = buildBars(thisMonth, monthly)
+            _state.update {
+                it.copy(
+                    currency = baseCurrency,
+                    expenseMinor = expenseTotal,
+                    incomeMinor = incomeTotal,
+                    balanceMinor = incomeTotal - expenseTotal,
+                    expenseByCategory = byCategory,
+                    monthlyBars = bars,
+                    insights = buildInsights(byCategory, expenseTotal, incomeTotal, bars, period),
+                    isLoading = false,
                 )
             }
-            .sortedByDescending { it.amountMinor }
+        }
+    }
 
-        // 近 6 个月柱状（不足 6 个月则有多少画多少）
-        val bars = (5 downTo 0).map { offset ->
+    /** SQL 已按金额倒序，这里只补占比。 */
+    private fun List<CategoryTotal>.toCategorySlices(expenseTotal: Long): List<CategorySlice> = map {
+        CategorySlice(
+            categoryId = it.categoryId,
+            name = it.categoryName,
+            amountMinor = it.amountMinor,
+            ratio = if (expenseTotal == 0L) 0f else it.amountMinor.toFloat() / expenseTotal,
+        )
+    }
+
+    /** 把 `yearMonth` 行转成 6 根柱子，缺的月份补零。 */
+    private fun buildBars(thisMonth: YearMonth, monthly: List<MonthlyTotal>): List<MonthBar> {
+        val byMonth = monthly.groupBy { it.yearMonth }
+        return (5 downTo 0).map { offset ->
             val ym = thisMonth.minusMonths(offset.toLong())
-            val from = ym.atDay(1).toEpochDay()
-            val to = ym.atEndOfMonth().toEpochDay()
-            val rows = allRows.filter { it.dateEpochDay in from..to }
+            val rows = byMonth[ym.toString().take(7)].orEmpty()
             MonthBar(
                 yearMonth = ym,
-                expenseMinor = rows.filter { it.categoryType == AccountType.EXPENSE }.sumOf { it.amountMinor },
-                incomeMinor = rows.filter { it.categoryType == AccountType.INCOME }.sumOf { it.amountMinor },
-            )
-        }
-
-        val insights = buildInsights(byCategory, expenseTotal, incomeTotal, bars, period)
-
-        _state.update {
-            it.copy(
-                currency = baseCurrency,
-                expenseMinor = expenseTotal,
-                incomeMinor = incomeTotal,
-                balanceMinor = incomeTotal - expenseTotal,
-                expenseByCategory = byCategory,
-                monthlyBars = bars,
-                insights = insights,
-                isLoading = false,
+                expenseMinor = rows.firstOrNull { it.accountType == AccountType.EXPENSE }?.amountMinor ?: 0L,
+                incomeMinor = rows.firstOrNull { it.accountType == AccountType.INCOME }?.amountMinor ?: 0L,
             )
         }
     }

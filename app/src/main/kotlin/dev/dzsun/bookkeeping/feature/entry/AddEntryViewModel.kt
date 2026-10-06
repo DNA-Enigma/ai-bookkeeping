@@ -147,11 +147,6 @@ class AddEntryViewModel @Inject constructor(
         _state.update { it.copy(isListening = !it.isListening) }
     }
 
-    fun onPhotoClick() {
-        // 拍照入口先保留；拿到字节后走 onPhotoCaptured，由 Activity 侧接系统相机/相册
-        _state.update { it.copy(parseError = "拍照识别即将上线，先试试文字或语音输入吧") }
-    }
-
     /**
      * 图片字节就绪后的真正入口。MIME 由调用方给出——契约只收 jpeg/png/webp，
      * HEIF 得先在调用方转成 JPEG。
@@ -164,6 +159,11 @@ class AddEntryViewModel @Inject constructor(
                 offlineFallback = false,
             )
         }
+    }
+
+    /** 图片读取/转码失败。没进调度层，也不该回落本地规则。 */
+    fun onCaptureError(message: String) {
+        _state.update { it.copy(isParsing = false, parseError = message) }
     }
 
     fun parseNow() {
