@@ -95,6 +95,74 @@ interface JournalDao {
         """,
     )
     fun observeLedgerRows(): Flow<List<LedgerRow>>
+
+    /**
+     * 按外部流水号找已导入过的那一笔。
+     *
+     * 这是**重复导入同一份文件**的幂等依据：单号已存在就跳过，
+     * 不必依赖唯一索引抛异常（异常没法区分「重复导入」与「真的写坏了」）。
+     */
+    @Query(
+        """
+        SELECT * FROM journal
+        WHERE externalSource = :source AND externalRef = :ref
+        LIMIT 1
+        """,
+    )
+    suspend fun findByExternalRef(source: String, ref: String): JournalEntity?
+
+    /**
+     * 找可能与「金额 [amountMinor]、日期 [anchorEpochDay] 前后 [windowDays] 天」重复的既有账目。
+     *
+     * 只比金额与时间窗，**不比对商户**——因为最需要去重的场景恰恰是
+     * 「拍票时商户名不规范、导入流水后商户名才对上」，用商户做条件会把该匹配的漏掉。
+     * 商户留给调用方在候选上做二次判断。
+     *
+     * `amountMinor` 取分类一侧的分录（支出为正、收入为负），与 [LedgerRow] 的口径一致。
+     */
+    @Query(
+        """
+        SELECT j.id AS journalId,
+               j.dateEpochDay AS dateEpochDay,
+               j.payee AS payee,
+               j.source AS source,
+               p.amountMinor AS amountMinor,
+               p.currency AS currency,
+               a.name AS categoryName,
+               ABS(j.dateEpochDay - :anchorEpochDay) AS dayDistance
+        FROM journal j
+        JOIN posting p ON p.journalId = j.id
+        JOIN account a ON a.id = p.accountId
+        WHERE a.type IN ('EXPENSE', 'INCOME')
+          AND p.amountMinor = :amountMinor
+          AND p.currency = :currency
+          AND j.status != 'VOID'
+          AND j.dateEpochDay BETWEEN :anchorEpochDay - :windowDays AND :anchorEpochDay + :windowDays
+        ORDER BY dayDistance
+        """,
+    )
+    suspend fun findDuplicateCandidates(
+        amountMinor: Long,
+        currency: String,
+        anchorEpochDay: Long,
+        windowDays: Int,
+    ): List<DuplicateCandidate>
+}
+
+@Dao
+interface JournalItemDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(items: List<JournalItemEntity>)
+
+    @Query("SELECT * FROM journal_item WHERE journalId = :journalId ORDER BY sortOrder")
+    suspend fun findByJournal(journalId: String): List<JournalItemEntity>
+
+    @Query("SELECT * FROM journal_item WHERE journalId IN (:journalIds) ORDER BY journalId, sortOrder")
+    suspend fun findByJournals(journalIds: List<String>): List<JournalItemEntity>
+
+    @Query("DELETE FROM journal_item WHERE journalId = :journalId")
+    suspend fun deleteByJournal(journalId: String)
 }
 
 /**
@@ -105,6 +173,24 @@ data class CategoryTotal(
     val categoryId: String,
     val categoryName: String,
     val amountMinor: Long,
+)
+
+/**
+ * 一条可能与新记录重复的既有账目。
+ *
+ * **去重只产出「候选」，不自动合并。** 同一天两杯一模一样的咖啡是真实存在的，
+ * 自动合并会吃掉用户真实记过的账——那比漏一笔更伤信任。
+ */
+data class DuplicateCandidate(
+    val journalId: String,
+    val dateEpochDay: Long,
+    val payee: String?,
+    val source: JournalSource,
+    val amountMinor: Long,
+    val currency: String,
+    val categoryName: String,
+    /** 与锚点日期的天数差，用来排序：越近越可能是同一笔。 */
+    val dayDistance: Long,
 )
 
 /** 某个月某个方向的合计。[yearMonth] 形如 `2026-10`。 */

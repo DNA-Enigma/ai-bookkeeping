@@ -55,6 +55,60 @@ curl -s -X POST http://127.0.0.1:8010/v1/tasks \
 
 ---
 
+## P0-1b　`POST /v1/tasks` 在 `mode: async` 下仍阻塞到拆解完成（实测 81 秒）
+
+**这是从真实客户端复现的**：应用选了张支付截图提交，客户端报「请求失败」，
+但**服务端其实受理成功了**，任务还在继续跑——最糟的一种错觉，两边对不上。
+
+```
+task_82912a7c43324393b00b
+created_at 2026-10-06T11:27:12Z
+updated_at 2026-10-06T11:28:33Z      ← 81 秒后才落终态
+status     rejected
+```
+
+契约把异步说成**基底**（`docs/03-http-contract.md`：「异步是基底，同步是优化」），
+`TaskAccepted.mode` 也确实返回 `async`、还带 `events_url`——读起来是「受理即返 202，
+结果走事件流」。但实测它一直阻塞到**评估 + 路由 + 拆解全部跑完**才返回，
+客户端只能靠猜一个够大的读超时。
+
+**影响**：任何按契约字面实现的客户端（受理即返、然后订阅事件流）都会撞上；
+超时设短了就像上面那样「客户端说失败、服务端说成功」。
+
+**建议**：异步模式下，路由决策产出后**立即**返回 202 + `events_url`，
+把拆解与执行留给后台；`TaskSnapshot` 本来就能反映后续进展。
+若确实需要同步拿到 `decision`，那 `docs/03` 里「异步是基底」这段与实现就对不上了，
+需要改的是文档或实现其中之一——总之两处要一致，别让消费端靠试。
+
+---
+
+## P0-1c　带图且已声明意图的记账任务被归为 `generic.unknown`，拆解出空计划后整单 rejected
+
+同一次复现：
+
+```
+subtitle  = generic.unknown · generic        ← 不是 bookkeeping
+modality  = ['image']                        ← 图是收到了的
+decision  = single_tool_action
+error     = 拆解在 2 次尝试后仍未产出合法计划：['strategy=single_step 但节点数为 0']
+```
+
+客户端发的是 `declared.intent = "bookkeeping.capture_from_receipt"` 且
+`authoritative: true`。但画像落到了 `generic.unknown`（词表里的兜底类型），
+随后拆解器给出 `strategy=single_step` 却**一个节点都没有**，校验不过 → rejected。
+
+对照：同样是这张图，用 curl 手工提交（`declared.intent` 相同但**不带**
+`authoritative`）是能跑通的——`extract` 成功、字段全对。
+
+**所以嫌疑集中在 `authoritative: true` 这条路径上**：契约说它「可跳过评估
+（是否真的跳过由策略 `routes[].evaluate` 决定）」，但实测的结果是既没跳过评估、
+声明也没被采纳，反而落到了兜底类型。**这条路径需要查**。
+
+另外无论原因如何，**「拆解产出 0 个节点」应当在校验里被更早、更明确地拦下**，
+而不是等两次重试后以 rejected 收场——这个错误信息对消费端没有可操作性。
+
+---
+
 ## P0-2　节点执行不传 `options`，深度思考一直开着，把超时撑爆
 
 带图截图任务的实测结果：

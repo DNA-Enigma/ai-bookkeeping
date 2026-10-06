@@ -280,7 +280,20 @@ class DispatcherClient @Inject constructor(
         const val DEFAULT_EVENT_TYPE = "message"
 
         const val CONNECT_TIMEOUT_MS = 15_000
-        const val REQUEST_READ_TIMEOUT_MS = 30_000
+
+        /**
+         * 读超时。**这个值比看起来该有的大得多，是有原因的。**
+         *
+         * 契约把异步说成基底（`mode: async`），读起来像是「受理即返 202」。
+         * 但实测 `POST /v1/tasks` 会**一直等到评估 + 路由 + 拆解跑完才返回**——
+         * 一次提交票据任务实测耗时 **81 秒**（还是重试了两次拆解之后失败的那种）。
+         * 原先设 30 秒，结果任务其实提交成功了，客户端却先报「请求失败」，
+         * 而服务端那边任务还在继续跑——最糟的一种错觉。
+         *
+         * 取 180 秒是按任务预算 `max_wall_ms: 120000` 再留余量。
+         * 后端若真的改成受理即返 202，这里可以降回去。
+         */
+        const val REQUEST_READ_TIMEOUT_MS = 180_000
 
         /** 要大于服务端的 sse_heartbeat_ms（默认 15000），否则心跳还没来就被我们掐了。 */
         const val STREAM_READ_TIMEOUT_MS = 60_000

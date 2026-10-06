@@ -18,12 +18,14 @@ object AppModule {
 
     /**
      * 刻意不开启 `fallbackToDestructiveMigration`：宁可 schema 变更后启动失败，
-     * 也不要静默清空用户账本。开发期改 schema 时手动卸载重装即可。
+     * 也不要静默清空用户账本。所以每次改 schema 都要**显式写出迁移**。
      */
     @Provides
     @Singleton
     fun provideLedgerDatabase(@ApplicationContext context: Context): LedgerDatabase =
-        Room.databaseBuilder(context, LedgerDatabase::class.java, "ledger.db").build()
+        Room.databaseBuilder(context, LedgerDatabase::class.java, "ledger.db")
+            .addMigrations(LedgerDatabase.MIGRATION_1_2)
+            .build()
 
     @Provides
     @Singleton

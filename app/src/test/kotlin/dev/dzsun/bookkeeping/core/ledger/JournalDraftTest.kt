@@ -1,6 +1,7 @@
 package dev.dzsun.bookkeeping.core.ledger
 
 import dev.dzsun.bookkeeping.core.database.JournalSource
+import dev.dzsun.bookkeeping.core.database.JournalStatus
 import dev.dzsun.bookkeeping.core.money.Money
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -124,4 +125,69 @@ class JournalDraftTest {
             )
         }
     }
+
+    // ------------------------------------------------------------ 跨渠道去重
+
+    @Test
+    fun `外部流水来源与单号必须成对给出`() {
+        // 只给单号不给来源，去重键就退化成"所有机构的单号互相比"，
+        // 不同机构撞号会误判成重复
+        assertThrows(IllegalArgumentException::class.java) {
+            expenseDraft().copy(externalRef = "4200002319")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            expenseDraft().copy(externalSource = "wechat")
+        }
+    }
+
+    @Test
+    fun `成对给出来源与单号时可以构造`() {
+        val draft = expenseDraft().copy(externalSource = "wechat", externalRef = "4200002319")
+        assertTrue(draft.isImported)
+    }
+
+    @Test
+    fun `没给外部单号的不算导入`() {
+        assertTrue(!expenseDraft().isImported)
+    }
+
+    @Test
+    fun `默认状态是已核对`() {
+        assertEquals(JournalStatus.CLEARED, expenseDraft().status)
+    }
+
+    // ------------------------------------------------------------ 明细
+
+    @Test
+    fun `明细是描述，不参与平衡校验`() {
+        // 折扣、税、抹零都会让明细之和与总额不等，强行对齐反而造错账
+        val draft = expenseDraft().copy(
+            items = listOf(
+                ItemDraft("拿铁 大杯", amountMinor = 3_500),
+                ItemDraft("纸杯蛋糕", amountMinor = 2_800),
+            ),
+        )
+        assertEquals(0L, draft.postings.sumOf { it.amount.amountMinor })
+    }
+
+    @Test
+    fun `明细金额可以缺失`() {
+        // 很多小票只给总额，明细那几行没有单价
+        val draft = expenseDraft().copy(items = listOf(ItemDraft("拿铁 大杯")))
+        assertEquals(null, draft.items.single().amountMinor)
+    }
+
+    @Test
+    fun `空描述的明细被拒绝`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            expenseDraft().copy(items = listOf(ItemDraft("   ")))
+        }
+    }
+
+    private fun expenseDraft() = JournalDraft.expense(
+        dateEpochDay = 20_000,
+        amount = money("38.00"),
+        fromAccountId = "asset.alipay",
+        categoryAccountId = "expense.food",
+    )
 }

@@ -1,12 +1,24 @@
 package dev.dzsun.bookkeeping.core.ledger
 
 import dev.dzsun.bookkeeping.core.database.JournalSource
+import dev.dzsun.bookkeeping.core.database.JournalStatus
 import dev.dzsun.bookkeeping.core.money.Money
 
 /** 一条待写入的分录。 */
 data class PostingDraft(
     val accountId: String,
     val amount: Money,
+)
+
+/**
+ * 一条待写入的明细。
+ *
+ * [amountMinor] 可空：很多小票只给总额，明细那几行没有单价。
+ * 它也不参与平衡校验——明细只描述，记账看分录。
+ */
+data class ItemDraft(
+    val description: String,
+    val amountMinor: Long? = null,
 )
 
 /**
@@ -29,6 +41,24 @@ data class JournalDraft(
     val note: String?,
     val source: JournalSource,
     val postings: List<PostingDraft>,
+
+    /** 默认已核对。AI 抽取或导入的结果应显式传 [JournalStatus.PENDING] 等用户核对。 */
+    val status: JournalStatus = JournalStatus.CLEARED,
+
+    /** 发生地点。回想时的锚点。 */
+    val place: String? = null,
+
+    /** 外部流水来源，如 `alipay` / `wechat` / `cmb`。与 [externalRef] 成对出现。 */
+    val externalSource: String? = null,
+
+    /** 外部流水单号，取「交易单号」（平台侧生成）而非「商户单号」。 */
+    val externalRef: String? = null,
+
+    /** 平台侧原始状态（如「已全额退款」）。再导入时靠它比对出变化。 */
+    val externalStatus: String? = null,
+
+    /** 小票明细，纯粹是「买了什么」的描述，不参与记账。 */
+    val items: List<ItemDraft> = emptyList(),
 ) {
     init {
         require(postings.size >= 2) {
@@ -46,7 +76,24 @@ data class JournalDraft(
             "复式记账要求分录金额之和为零，实际为 $sum 个最小单位：" +
                 postings.joinToString { "${it.accountId}=${it.amount.toPlainString()}" }
         }
+        // 只有单号没有来源是没意义的——去重键是这一对，单缺一个就退化成
+        // 「所有单号互相比」，不同机构同号会误判成重复
+        require((externalSource == null) == (externalRef == null)) {
+            "externalSource 与 externalRef 必须同时给出或同时不给出" +
+                "（当前 source=$externalSource, ref=$externalRef）"
+        }
+        // 状态得挂在某个单号上才可比对：没有单号，"上次的状态"就是无主的值，
+        // 再导入时无从知道它是哪一笔的
+        require(externalStatus == null || externalRef != null) {
+            "externalStatus 必须伴随 externalRef 才有意义"
+        }
+        require(items.all { it.description.isNotBlank() }) {
+            "明细的描述不能为空——空明细行对「想起买了什么」毫无用处"
+        }
     }
+
+    /** 是否来自外部流水。 */
+    val isImported: Boolean get() = externalRef != null
 
     val currency: String get() = postings.first().amount.currency
 
