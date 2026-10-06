@@ -68,7 +68,7 @@ private val tabs = listOf(
  * 中央 + 是「记一笔」半屏面板，不占路由。
  */
 @Composable
-fun AppNavHost() {
+fun AppNavHost(onSignOut: () -> Unit = {}) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
