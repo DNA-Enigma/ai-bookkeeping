@@ -6,11 +6,14 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.dzsun.bookkeeping.BuildConfig
 import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.database.AccountType
+import dev.dzsun.bookkeeping.core.ledger.ConfidenceGate
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import dev.dzsun.bookkeeping.core.update.ApkInstaller
 import dev.dzsun.bookkeeping.core.update.UpdateChecker
 import dev.dzsun.bookkeeping.core.update.UpdateManifest
 import dev.dzsun.bookkeeping.core.update.UpdateStatus
+import dev.dzsun.bookkeeping.feature.entry.AutoConfirmSettings
+import kotlinx.coroutines.flow.update
 import java.io.File
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +45,11 @@ data class SettingsUiState(
     val versionName: String = BuildConfig.VERSION_NAME,
     val versionCode: Int = BuildConfig.VERSION_CODE,
     val update: UpdateUiState = UpdateUiState.Idle,
+    /** 自动入账阈值。数据源是 [AutoConfirmSettings]，设置页只读写它。 */
+    val autoConfirmThreshold: Float = ConfidenceGate.DEFAULT_THRESHOLD,
+    /** 可调范围，来自数据层的 assets 配置。 */
+    val autoConfirmRange: ClosedFloatingPointRange<Float> =
+        ConfidenceGate.MIN_THRESHOLD..ConfidenceGate.MAX_THRESHOLD,
 )
 
 @HiltViewModel
@@ -49,6 +57,7 @@ class SettingsViewModel @Inject constructor(
     private val repository: LedgerRepository,
     private val updateChecker: UpdateChecker,
     private val apkInstaller: ApkInstaller,
+    private val autoConfirmSettings: AutoConfirmSettings,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -58,6 +67,14 @@ class SettingsViewModel @Inject constructor(
     private var pendingApk: File? = null
 
     init {
+        viewModelScope.launch {
+            _state.update { it.copy(autoConfirmRange = autoConfirmSettings.range) }
+        }
+        viewModelScope.launch {
+            autoConfirmSettings.threshold.collect { value ->
+                _state.update { it.copy(autoConfirmThreshold = value) }
+            }
+        }
         viewModelScope.launch {
             val currency = repository.observeBaseCurrency()
             // 首次拉取即可；分类管理的增删改属于后续接口，这里先做只读展示
@@ -79,6 +96,12 @@ class SettingsViewModel @Inject constructor(
     }
 
     /** 设置页手动检查。失败在这里可以提示——用户正等着这个结果。 */
+    /**
+     * 改自动入账阈值。**立即生效**：写入的是 [AutoConfirmSettings] 这个单例，
+     * 记账页读的是同一个源，所以不需要重启或重新进入页面。
+     */
+    fun onAutoConfirmThresholdChange(value: Float) = autoConfirmSettings.setThreshold(value)
+
     fun checkForUpdate() {
         if (_state.value.update is UpdateUiState.Checking) return
         _state.update { it.copy(update = UpdateUiState.Checking) }

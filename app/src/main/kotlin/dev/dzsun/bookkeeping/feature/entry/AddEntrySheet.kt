@@ -123,6 +123,14 @@ fun AddEntrySheet(
                 }
             }
 
+            state.autoSaved?.let { notice ->
+                AutoSavedBar(
+                    notice = notice,
+                    onUndo = viewModel::undoAutoSaved,
+                    onDismiss = viewModel::dismissAutoSaved,
+                )
+            }
+
             state.parseError?.let { msg ->
                 Text(
                     msg,
@@ -227,6 +235,7 @@ private fun AiCaptureBody(
                 categories = if (card.kind == EntryKind.INCOME) state.incomeCategories
                 else state.expenseCategories,
                 currency = state.currency.ifBlank { "CNY" },
+                confidenceThreshold = state.autoConfirmThreshold,
                 onAmountChange = { viewModel.onCardAmountChange(card.id, it) },
                 onCategoryChange = { viewModel.onCardCategoryChange(card.id, it) },
                 onPayeeChange = { viewModel.onCardPayeeChange(card.id, it) },

@@ -81,9 +81,12 @@ fun collectFieldEdits(baseline: DraftCard, current: DraftCard): List<FieldEdit> 
 /**
  * 离线降级：低置信度卡片合成一条本地 [PendingClarification]，
  * 形状与服务端 `confirmation` 段下发的完全一致，渲染器无感切换。
+ *
+ * [threshold] 与自动入账用的是**同一个**阈值：两处各定一个的话，会出现
+ * 「本地认为该问、自动入账却直接放了」这种自相矛盾的状态。
  */
-fun localClarification(cards: List<DraftCard>): PendingClarification? {
-    val low = cards.filter { !it.isHighConfidence }
+fun localClarification(cards: List<DraftCard>, threshold: Float): PendingClarification? {
+    val low = cards.filter { !it.isHighConfidence(threshold) }
     if (low.isEmpty()) return null
     val first = low.first()
     return PendingClarification(
@@ -149,7 +152,9 @@ fun ReceiptFields.toDraftCard(
         payee = merchant.orEmpty(),
         note = notes.orEmpty(),
         dateEpochDay = parseDateEpochDay(datetime) ?: todayEpochDay,
-        confidence = (confidence ?: 0.0).toFloat(),
+        // 如实传：拿不到就是 null，别在这里补成 0——补了以后就分不出
+        // 「识别得很勉强」和「压根没给置信度」
+        confidence = confidence?.toFloat(),
     )
 }
 

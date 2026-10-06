@@ -2,6 +2,7 @@ package dev.dzsun.bookkeeping.feature.entry
 
 import dev.dzsun.bookkeeping.core.network.ClarificationOption
 import dev.dzsun.bookkeeping.core.network.FieldEdit
+import dev.dzsun.bookkeeping.core.ledger.ConfidenceGate
 import dev.dzsun.bookkeeping.core.network.ReceiptFields
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
@@ -12,6 +13,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ClarificationTest {
+
+    /** 与设置页默认值一致。测的是「阈值可传」，所以这里取一个明确的数。 */
+    private val THRESHOLD = ConfidenceGate.DEFAULT_THRESHOLD
 
     private fun card(
         kind: EntryKind = EntryKind.EXPENSE,
@@ -81,8 +85,8 @@ class ClarificationTest {
 
     @Test
     fun `local clarification only for low confidence cards`() {
-        assertNull(localClarification(listOf(card(confidence = 0.9f))))
-        val pending = localClarification(listOf(card(confidence = 0.5f)))
+        assertNull(localClarification(listOf(card(confidence = 0.9f)), THRESHOLD))
+        val pending = localClarification(listOf(card(confidence = 0.5f)), THRESHOLD)
         assertNotNull(pending)
         assertEquals(true, pending!!.blocking)
         assertEquals(2, pending.options.size)
@@ -118,7 +122,7 @@ class ClarificationTest {
         assertEquals("12.34", draft.amountText)
         assertEquals("星巴克", draft.payee)
         assertEquals(0.95f, draft.confidence)
-        assertTrue(draft.isHighConfidence)
+        assertTrue(draft.isHighConfidence(THRESHOLD))
     }
 
     @Test
@@ -133,7 +137,7 @@ class ClarificationTest {
         assertEquals(EntryKind.EXPENSE, draft.kind)
         assertEquals("", draft.amountText)
         assertEquals(42L, draft.dateEpochDay)
-        assertTrue(!draft.isHighConfidence)
+        assertTrue(!draft.isHighConfidence(THRESHOLD))
     }
 
     // —— 无选项澄清：自由文本是契约里唯一可用的答复路径 ——

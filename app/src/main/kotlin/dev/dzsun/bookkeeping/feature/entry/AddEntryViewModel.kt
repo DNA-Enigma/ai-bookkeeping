@@ -7,6 +7,7 @@ import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.database.JournalSource
 import dev.dzsun.bookkeeping.core.ledger.ItemDraft
+import dev.dzsun.bookkeeping.core.ledger.ConfidenceGate
 import dev.dzsun.bookkeeping.core.ledger.JournalDraft
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import dev.dzsun.bookkeeping.core.money.Money
@@ -68,16 +69,38 @@ data class DraftCard(
     val payee: String,
     val note: String,
     val dateEpochDay: Long,
-    val confidence: Float,
+    /**
+     * 识别置信度。**null 表示拿不到**（老服务端不给、或事件流断了只能回看快照），
+     * 不是「置信度为 0」——两者的处理一样（都走确认卡），但含义不同，
+     * 混成一个数以后就再也分不出来了。
+     */
+    val confidence: Float? = null,
     val error: String? = null,
     /** 发生地点。金额和商户都记不住时的最后一个锚点。 */
     val place: String = "",
     /** 小票明细，纯描述，不参与记账。 */
     val items: List<ItemLine> = emptyList(),
 ) {
-    val isHighConfidence: Boolean get() = confidence >= 0.8f
+    /**
+     * 达阈值才算高置信。阈值由 [AutoConfirmSettings] 提供、用户在设置页可调，
+     * 所以是函数而不是属性——写成属性就得把阈值写死在数据类里。
+     */
+    fun isHighConfidence(threshold: Float): Boolean = ConfidenceGate.canAutoPost(confidence, threshold)
+
     val canSave: Boolean get() = amountText.isNotBlank() && categoryId.isNotBlank() && error == null
 }
+
+/**
+ * 自动入账之后给用户看的那一条。
+ *
+ * [undoAvailable] 为 false 时**不渲染撤销按钮**：那说明数据层还没有作废接口
+ * （见 [AutoEntryUndo]）。显示一个点不动的按钮，比不显示更让人恼火。
+ */
+data class AutoSavedNotice(
+    val journalId: String?,
+    val label: String,
+    val undoAvailable: Boolean,
+)
 
 data class AddEntryUiState(
     val mode: EntryMode = EntryMode.AI,
@@ -114,6 +137,14 @@ data class AddEntryUiState(
     val amountError: String? = null,
     val isSaving: Boolean = false,
     val saved: Boolean = false,
+    /**
+     * 高置信自动入账后的交代。非空时界面显示一条「已入账 ¥38.50 星巴克 · 撤销」。
+     * 与 [saved]（手动保存后的全屏动效）分开：那条路用户按过按钮，这条没按过，
+     * 给他一个明确的反悔口子才算交代清楚。
+     */
+    val autoSaved: AutoSavedNotice? = null,
+    /** 自动入账阈值。界面只读，来源是 [AutoConfirmSettings]。 */
+    val autoConfirmThreshold: Float = ConfidenceGate.DEFAULT_THRESHOLD,
 ) {
     val visibleCategories: List<AccountEntity>
         get() = if (kind == EntryKind.INCOME) incomeCategories else expenseCategories
@@ -138,6 +169,8 @@ class AddEntryViewModel @Inject constructor(
     private val parser: AiParser,
     private val clarificationPort: ClarificationPort,
     private val captureClient: CaptureClient,
+    private val autoConfirmSettings: AutoConfirmSettings,
+    private val autoEntryUndo: AutoEntryUndo,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AddEntryUiState(dateEpochDay = clock.today().toEpochDay()))
@@ -147,6 +180,12 @@ class AddEntryViewModel @Inject constructor(
     private val baselines = mutableMapOf<String, DraftCard>()
 
     init {
+        viewModelScope.launch {
+            // 阈值用户可调，界面跟着它走——写死一个数就会与设置页显示的不一致
+            autoConfirmSettings.threshold.collect { value ->
+                _state.update { it.copy(autoConfirmThreshold = value) }
+            }
+        }
         viewModelScope.launch {
             val currency = repository.observeBaseCurrency().first().orEmpty()
             val expenseCategories = repository.accountsOfTypes(listOf(AccountType.EXPENSE))
@@ -239,7 +278,15 @@ class AddEntryViewModel @Inject constructor(
                     expenseCategories = current.expenseCategories,
                     incomeCategories = current.incomeCategories,
                 )
-                applyCards(listOf(card), taskId = outcome.taskId, clarification = null)
+                // 路线图 P0-a：高置信直接入账，低置信（或拿不到置信度）才走确认卡。
+                // 前提条件不满足时也退回确认卡——自动路径不该有静默失败。
+                if (ConfidenceGate.canAutoPost(card.confidence, current.autoConfirmThreshold) &&
+                    canAutoPost(card, current)
+                ) {
+                    autoConfirm(card, outcome.taskId, current)
+                } else {
+                    applyCards(listOf(card), taskId = outcome.taskId, clarification = null)
+                }
             }
 
             is CaptureOutcome.NeedsClarification -> {
@@ -297,7 +344,11 @@ class AddEntryViewModel @Inject constructor(
                 confidence = p.confidence,
             )
         }
-        applyCards(cards, taskId = null, clarification = localClarification(cards))
+        applyCards(
+            cards,
+            taskId = null,
+            clarification = localClarification(cards, _state.value.autoConfirmThreshold),
+        )
     }
 
     private fun applyCards(
@@ -358,7 +409,10 @@ class AddEntryViewModel @Inject constructor(
         baselines.remove(id)
         s.copy(
             cards = s.cards.filterNot { it.id == id },
-            pendingClarification = localClarification(s.cards.filterNot { it.id == id }),
+            pendingClarification = localClarification(
+                s.cards.filterNot { it.id == id },
+                s.autoConfirmThreshold,
+            ),
         )
     }
 
@@ -419,56 +473,10 @@ class AddEntryViewModel @Inject constructor(
 
         _state.update { it.copy(isSaving = true) }
         viewModelScope.launch {
-            val result = runCatching {
-                current.cards.forEach { card ->
-                    val amount = Money.parse(card.amountText, current.currency.ifBlank { "CNY" })
-                    if (amount.isZero()) error("金额不能为零")
-                    val categoryPool =
-                        if (card.kind == EntryKind.INCOME) current.incomeCategories else current.expenseCategories
-                    val categoryId = card.categoryId.ifBlank {
-                        categoryPool.firstOrNull()?.id ?: error("缺少分类")
-                    }
-                    val itemDrafts = card.items.toItemDrafts(current.currency.ifBlank { "CNY" })
-                    val draft = when (card.kind) {
-                        EntryKind.INCOME -> JournalDraft.income(
-                            dateEpochDay = card.dateEpochDay,
-                            amount = amount,
-                            toAccountId = accountId,
-                            categoryAccountId = categoryId,
-                            payee = card.payee.ifBlank { null },
-                            note = card.note.ifBlank { null },
-                            source = current.aiSource,
-                        )
-
-                        else -> JournalDraft.expense(
-                            dateEpochDay = card.dateEpochDay,
-                            amount = amount,
-                            fromAccountId = accountId,
-                            categoryAccountId = categoryId,
-                            payee = card.payee.ifBlank { null },
-                            note = card.note.ifBlank { null },
-                            source = current.aiSource,
-                        )
-                    }.copy(
-                        place = card.place.trim().ifBlank { null },
-                        items = itemDrafts,
-                    )
-                    repository.post(draft)
-                }
-            }
-            result.fold(
+            runCatching { postCards(current.cards, current) }.fold(
                 onSuccess = {
-                    // 修正反馈：有改动就是 edited，没动是 confirmed——那是自进化最值钱的标注
-                    val edits = current.fieldEdits
-                    runCatching {
-                        clarificationPort.feedback(
-                            current.activeTaskId,
-                            TaskFeedback(
-                                verdict = if (edits.isEmpty()) FeedbackVerdict.ACCEPTED else FeedbackVerdict.EDITED,
-                                edits = edits,
-                            ),
-                        )
-                    }
+                    // 修正反馈：有改动就是 edited，没动是 accepted——那是自进化最值钱的标注
+                    reportFeedback(current.activeTaskId, current.fieldEdits)
                     baselines.clear()
                     _state.update {
                         it.copy(
@@ -487,6 +495,147 @@ class AddEntryViewModel @Inject constructor(
                         it.copy(isSaving = false, parseError = error.message ?: "入账失败")
                     }
                 },
+            )
+        }
+    }
+
+    // ---------- 自动入账（P0-a） ----------
+
+    /**
+     * 自动入账的前提条件都满足吗。
+     *
+     * 缺一样就退回确认卡让用户补。**自动路径不该有失败分支**——那笔账用户没按过
+     * 任何按钮，失败了不告诉他，他会以为记上了。
+     */
+    private fun canAutoPost(card: DraftCard, state: AddEntryUiState): Boolean {
+        if (state.fromAccountId.isBlank() || state.currency.isBlank()) return false
+        if (card.categoryId.isBlank()) return false
+        val amount = runCatching { Money.parse(card.amountText, state.currency) }.getOrNull()
+        return amount != null && !amount.isZero()
+    }
+
+    /**
+     * 高置信那笔直接落库，并留下一条可撤销的提示。
+     *
+     * 失败时退回确认卡并说明原因：宁可让用户多按一下，也不能把钱悄悄丢了。
+     */
+    private suspend fun autoConfirm(card: DraftCard, taskId: String, state: AddEntryUiState) {
+        runCatching { postCards(listOf(card), state) }.fold(
+            onSuccess = { journalIds ->
+                reportFeedback(taskId, emptyList())
+                _state.update {
+                    it.copy(
+                        isParsing = false,
+                        autoSaved = AutoSavedNotice(
+                            journalId = journalIds.firstOrNull(),
+                            label = autoSavedLabel(card),
+                            undoAvailable = autoEntryUndo.isAvailable,
+                        ),
+                        cards = emptyList(),
+                        pendingClarification = null,
+                        activeTaskId = null,
+                    )
+                }
+            },
+            onFailure = { error ->
+                applyCards(
+                    listOf(card),
+                    taskId = taskId,
+                    clarification = null,
+                    error = "自动入账没成功，请核对后重试：${error.message}",
+                )
+            },
+        )
+    }
+
+    /** 「已入账 ¥38.50 星巴克」——金额加一句这是什么。 */
+    private fun autoSavedLabel(card: DraftCard): String {
+        val amount = card.amountText.ifBlank { "0" }
+        val what = card.payee.ifBlank { card.note }.trim()
+        return if (what.isEmpty()) "¥$amount" else "¥$amount $what"
+    }
+
+    /**
+     * 撤销刚自动入账的那笔。
+     *
+     * 撤不掉时**如实说**：让用户以为撤了、账本里却还在，比告诉他撤不掉更糟。
+     */
+    fun undoAutoSaved() {
+        val notice = _state.value.autoSaved ?: return
+        val journalId = notice.journalId
+        if (journalId == null || !notice.undoAvailable) return
+        viewModelScope.launch {
+            val ok = runCatching { autoEntryUndo.undo(journalId) }.getOrDefault(false)
+            _state.update {
+                if (ok) {
+                    // 撤销后回到记账输入页：把刚填的原始文本也清掉，避免误以为还没提交
+                    it.copy(autoSaved = null, parseError = null)
+                } else {
+                    it.copy(
+                        autoSaved = notice.copy(undoAvailable = false),
+                        parseError = "撤销没成功，这笔还在账本里",
+                    )
+                }
+            }
+        }
+    }
+
+    /** 用户点了「知道了」，或提示自己超时了。 */
+    fun dismissAutoSaved() = _state.update { it.copy(autoSaved = null) }
+
+    /** 把若干张卡片落库，返回凭证 id。**确认入账与自动入账共用这一段**。 */
+    private suspend fun postCards(cards: List<DraftCard>, state: AddEntryUiState): List<String> {
+        val accountId = state.fromAccountId
+        val currency = state.currency.ifBlank { "CNY" }
+        return cards.map { card ->
+            val amount = Money.parse(card.amountText, currency)
+            if (amount.isZero()) error("金额不能为零")
+            val categoryPool =
+                if (card.kind == EntryKind.INCOME) state.incomeCategories else state.expenseCategories
+            val categoryId = card.categoryId.ifBlank {
+                categoryPool.firstOrNull()?.id ?: error("缺少分类")
+            }
+            val itemDrafts = card.items.toItemDrafts(currency)
+            val draft = when (card.kind) {
+                EntryKind.INCOME -> JournalDraft.income(
+                    dateEpochDay = card.dateEpochDay,
+                    amount = amount,
+                    toAccountId = accountId,
+                    categoryAccountId = categoryId,
+                    payee = card.payee.ifBlank { null },
+                    note = card.note.ifBlank { null },
+                    source = state.aiSource,
+                )
+
+                else -> JournalDraft.expense(
+                    dateEpochDay = card.dateEpochDay,
+                    amount = amount,
+                    fromAccountId = accountId,
+                    categoryAccountId = categoryId,
+                    payee = card.payee.ifBlank { null },
+                    note = card.note.ifBlank { null },
+                    source = state.aiSource,
+                )
+            }.copy(
+                place = card.place.trim().ifBlank { null },
+                items = itemDrafts,
+            )
+            repository.post(draft)
+        }
+    }
+
+    /**
+     * 回报人工校对信号。有改动就是 `edited`，没动是 `accepted`——
+     * 那是自进化最值钱的标注。回报失败不影响入账，所以只吞不抛。
+     */
+    private suspend fun reportFeedback(taskId: String?, edits: List<FieldEdit>) {
+        runCatching {
+            clarificationPort.feedback(
+                taskId,
+                TaskFeedback(
+                    verdict = if (edits.isEmpty()) FeedbackVerdict.ACCEPTED else FeedbackVerdict.EDITED,
+                    edits = edits,
+                ),
             )
         }
     }

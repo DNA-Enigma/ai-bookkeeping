@@ -127,6 +127,14 @@ fun AddEntryScreen(
 @Composable
 private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
     Column(modifier = Modifier.fillMaxSize()) {
+        state.autoSaved?.let { notice ->
+            AutoSavedBar(
+                notice = notice,
+                onUndo = viewModel::undoAutoSaved,
+                onDismiss = viewModel::dismissAutoSaved,
+            )
+        }
+
         // 自然语言输入区
         Card(
             modifier = Modifier
@@ -150,7 +158,6 @@ private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                     )
                 }
-                Spacer(Modifier.height(8.dp))
                 Text(
                     "例如：今天打车花了 30，午饭 18，昨天在星巴克咖啡 32",
                     style = MaterialTheme.typography.bodySmall,
@@ -260,6 +267,7 @@ private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
                 items(state.cards, key = { it.id }) { card ->
                     ParsedCard(
                         card = card,
+                        confidenceThreshold = state.autoConfirmThreshold,
                         categories = if (card.kind == EntryKind.INCOME) state.incomeCategories
                         else state.expenseCategories,
                         currency = state.currency.ifBlank { "CNY" },
@@ -300,6 +308,8 @@ fun ParsedCard(
     card: DraftCard,
     categories: List<AccountEntity>,
     currency: String,
+    /** 自动入账阈值。拿它判「要不要提示核对」——界面不自建阈值。 */
+    confidenceThreshold: Float,
     onAmountChange: (String) -> Unit,
     onCategoryChange: (String) -> Unit,
     onPayeeChange: (String) -> Unit,
@@ -327,13 +337,20 @@ fun ParsedCard(
                     label = { Text(if (card.kind == EntryKind.INCOME) "收入" else "支出") },
                 )
                 Spacer(Modifier.weight(1f))
-                if (!card.isHighConfidence) {
+                if (!card.isHighConfidence(confidenceThreshold)) {
                     NeedsConfirmChip()
                     Spacer(Modifier.width(4.dp))
                 }
                 IconButton(onClick = onRemove) {
                     Icon(Icons.Default.Delete, contentDescription = "删除", tint = MaterialTheme.colorScheme.error)
                 }
+            }
+
+            // 低置信（或压根拿不到置信度）才走到这张卡，明说一句让用户知道该核对什么。
+            // 高置信的走的是自动入账，不会出现在这里。
+            if (!card.isHighConfidence(confidenceThreshold)) {
+                LowConfidenceHint()
+                Spacer(Modifier.height(4.dp))
             }
 
             OutlinedTextField(

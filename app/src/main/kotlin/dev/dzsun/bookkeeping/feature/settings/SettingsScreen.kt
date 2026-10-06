@@ -24,6 +24,9 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material3.Slider
+import dev.dzsun.bookkeeping.feature.entry.AutoConfirmSettings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -147,6 +150,16 @@ fun SettingsScreen(
                         )
                     }
                 }
+            }
+
+            // 记账
+            item { SectionTitle("记账") }
+            item {
+                AutoConfirmThresholdCard(
+                    threshold = state.autoConfirmThreshold,
+                    range = state.autoConfirmRange,
+                    onChange = viewModel::onAutoConfirmThresholdChange,
+                )
             }
 
             // 偏好
@@ -416,6 +429,60 @@ private fun CategoryGroupCard(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 自动入账阈值。**这是产品口径的旋钮，不是技术参数**，所以文案要说清两边的后果：
+ * 调高＝问得更勤，调低＝记得更顺但更容易记错。
+ */
+@Composable
+private fun AutoConfirmThresholdCard(
+    threshold: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Bolt, contentDescription = null)
+                Spacer(Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("自动入账置信度", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "识别置信度达到这个数的账**直接入账**，不再弹确认；低于它的仍然先让你核对。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    "%.2f".format(threshold),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Slider(
+                value = threshold,
+                onValueChange = onChange,
+                valueRange = range,
+                // 0.05 一档：再细也没有意义，用户分辨不出 0.83 和 0.84 的差别
+                steps = 9,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "更少打扰（容易记错）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "更多确认（更稳）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

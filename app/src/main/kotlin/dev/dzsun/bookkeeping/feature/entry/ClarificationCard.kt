@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -155,4 +157,31 @@ fun NeedsConfirmChip(modifier: Modifier = Modifier) {
         label = { Text("待确认") },
         modifier = modifier,
     )
+}
+
+/**
+ * 低置信时的核对提示。
+ *
+ * 说的是**该核对什么**，而不是只报一个数字：「置信度 0.62」对用户没有意义，
+ * 「识别置信度较低，请核对金额和分类」才是他能照着做的事。
+ */
+@Composable
+fun LowConfidenceHint(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Default.Info,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.error,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            "识别置信度较低，请核对金额和分类",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
 }
