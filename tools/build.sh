@@ -11,7 +11,7 @@ GRADLE_VERSION="${GRADLE_VERSION:-9.8.0}"
 export JAVA_HOME="$TOOLCHAIN_ROOT/jdk"
 export ANDROID_HOME="$TOOLCHAIN_ROOT/sdk"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
-export PATH="$JAVA_HOME/bin:$PATH"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
 
 cd "$(dirname "$0")/.."
 

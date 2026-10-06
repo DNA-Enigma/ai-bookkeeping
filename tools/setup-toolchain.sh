@@ -11,7 +11,9 @@ JDK_DIR="$TOOLCHAIN_ROOT/jdk"
 SDK_DIR="$TOOLCHAIN_ROOT/sdk"
 GRADLE_DIR="$TOOLCHAIN_ROOT/gradle-$GRADLE_VERSION"
 DL_DIR="$TOOLCHAIN_ROOT/downloads"
-CMDLINE_DIR="$TOOLCHAIN_ROOT/cmdline-tools"
+# 必须放在 SDK 根**里面**：avdmanager/sdkmanager 按自身位置往上三级推断 SDK 根，
+# 放在外面会让它们把根认成 $TOOLCHAIN_ROOT，进而把包路径记成 sdk/... 双重前缀。
+CMDLINE_DIR="$SDK_DIR/cmdline-tools"
 
 GRADLE_VERSION="${GRADLE_VERSION:-9.8.0}"
 JDK_TARBALL="OpenJDK17U-jdk_x64_linux_hotspot_17.0.20.1_1.tar.gz"
