@@ -19,7 +19,8 @@ import kotlinx.coroutines.flow.stateIn
 
 data class LedgerUiState(
     val monthLabel: String = "",
-    val currency: String = "",
+    /** null 表示科目表还没读出来。币种未知时不能构造 Money，所以这里刻意可空。 */
+    val currency: String? = null,
     val entries: List<LedgerRow> = emptyList(),
     val monthExpenseMinor: Long = 0L,
     val monthIncomeMinor: Long = 0L,

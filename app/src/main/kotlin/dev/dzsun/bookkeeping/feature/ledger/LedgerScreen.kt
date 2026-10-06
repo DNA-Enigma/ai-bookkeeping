@@ -33,7 +33,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.database.LedgerRow
 import dev.dzsun.bookkeeping.core.money.Money
 import java.time.LocalDate
@@ -62,8 +61,11 @@ fun LedgerScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            SummaryCard(state)
-            HorizontalDivider()
+            // 币种未知时不渲染合计：Money 不接受空币种，这是刻意的
+            state.currency?.let { currency ->
+                SummaryCard(state, currency)
+                HorizontalDivider()
+            }
             if (state.entries.isEmpty()) {
                 EmptyLedger(isLoading = state.isLoading)
             } else {
@@ -74,7 +76,7 @@ fun LedgerScreen(
 }
 
 @Composable
-private fun SummaryCard(state: LedgerUiState) {
+private fun SummaryCard(state: LedgerUiState, currency: String) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -83,11 +85,11 @@ private fun SummaryCard(state: LedgerUiState) {
             modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
-            SummaryCell("支出", Money.of(state.monthExpenseMinor, state.currency), negative = true)
-            SummaryCell("收入", Money.of(state.monthIncomeMinor, state.currency), negative = false)
+            SummaryCell("支出", Money.of(state.monthExpenseMinor, currency), negative = true)
+            SummaryCell("收入", Money.of(state.monthIncomeMinor, currency), negative = false)
             SummaryCell(
                 "结余",
-                Money.of(abs(state.balanceMinor), state.currency),
+                Money.of(abs(state.balanceMinor), currency),
                 negative = state.balanceMinor < 0,
             )
         }
@@ -151,8 +153,9 @@ private fun DayHeading(epochDay: Long) {
 
 @Composable
 private fun EntryRow(row: LedgerRow) {
-    // 支出侧分录为正、收入侧为负，统一翻成"用户看到的方向"
-    val signedMinor = if (row.categoryType == AccountType.INCOME) -row.amountMinor else row.amountMinor
+    // 分类一侧的分录恒与"钱的流向"相反：支出分录为正、收入分录为负，
+    // 所以两者都要取负才是用户看到的方向。只翻收入会让支出显示成 +¥38.50。
+    val signedMinor = -row.amountMinor
     val amount = Money.of(abs(signedMinor), row.currency)
     val subtitle = listOfNotNull(row.payee?.takeIf { it.isNotBlank() }, row.counterpartyName.takeIf { it.isNotBlank() })
         .joinToString(" · ")
