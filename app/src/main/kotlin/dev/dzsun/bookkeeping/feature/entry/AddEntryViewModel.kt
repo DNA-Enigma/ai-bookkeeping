@@ -59,6 +59,8 @@ data class AddEntryUiState(
     val cards: List<DraftCard> = emptyList(),
     val parseError: String? = null,
     val allSaved: Boolean = false,
+    /** 当前这批卡片从哪个渠道来：拍票是 [JournalSource.RECEIPT]，文字/语音是 [JournalSource.VOICE]。 */
+    val aiSource: JournalSource = JournalSource.RECEIPT,
     /** 服务端或本地合成的澄清；非空时确认页优先渲染它。 */
     val pendingClarification: PendingClarification? = null,
     /** `CaptureOutcome.NeedsClarification` 带来的任务 id，`clarify`/`feedback` 要用。 */
@@ -152,7 +154,7 @@ class AddEntryViewModel @Inject constructor(
      * HEIF 得先在调用方转成 JPEG。
      */
     fun onPhotoCaptured(bytes: ByteArray, mime: String) {
-        _state.update { it.copy(isParsing = true, parseError = null, allSaved = false) }
+        _state.update { it.copy(isParsing = true, parseError = null, allSaved = false, aiSource = JournalSource.RECEIPT) }
         viewModelScope.launch {
             runCapture(
                 request = CaptureRequest(intent = INTENT_RECEIPT, text = null, media = MediaPayload(bytes, mime)),
@@ -172,7 +174,7 @@ class AddEntryViewModel @Inject constructor(
             _state.update { it.copy(parseError = "先说说这笔账，比如「今天打车花了 30」") }
             return
         }
-        _state.update { it.copy(isParsing = true, parseError = null, allSaved = false) }
+        _state.update { it.copy(isParsing = true, parseError = null, allSaved = false, aiSource = JournalSource.VOICE) }
         viewModelScope.launch {
             runCapture(
                 request = CaptureRequest(intent = INTENT_RECEIPT, text = raw),
@@ -389,7 +391,7 @@ class AddEntryViewModel @Inject constructor(
                             categoryAccountId = categoryId,
                             payee = card.payee.ifBlank { null },
                             note = card.note.ifBlank { null },
-                            source = JournalSource.AI_IMPORT,
+                            source = current.aiSource,
                         )
 
                         else -> JournalDraft.expense(
@@ -399,7 +401,7 @@ class AddEntryViewModel @Inject constructor(
                             categoryAccountId = categoryId,
                             payee = card.payee.ifBlank { null },
                             note = card.note.ifBlank { null },
-                            source = JournalSource.AI_IMPORT,
+                            source = current.aiSource,
                         )
                     }
                     repository.post(draft)
