@@ -6,6 +6,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.database.JournalSource
+import dev.dzsun.bookkeeping.core.ledger.ItemDraft
 import dev.dzsun.bookkeeping.core.ledger.JournalDraft
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import dev.dzsun.bookkeeping.core.money.Money
@@ -34,6 +35,30 @@ enum class EntryKind { EXPENSE, INCOME, TRANSFER }
 /** 录入页顶部的模式切换：AI 自然语言，或手动表单。 */
 enum class EntryMode { AI, MANUAL }
 
+/**
+ * 表单上的明细行（「买了什么」）。
+ *
+ * [amountText] 空 = 不填单价——很多小票只给总额。
+ * **明细不参与记账**：金额仍以分录为准，这里也不做「明细之和 == 总额」的校验。
+ */
+data class ItemLine(
+    val description: String = "",
+    val amountText: String = "",
+)
+
+/**
+ * 明细行 → 草稿。空描述的行直接丢掉——它对「几周后想起买了什么」毫无用处。
+ * 不在这里校验与总额的关系：折扣、税、抹零都会让两者不等。
+ */
+fun List<ItemLine>.toItemDrafts(currency: String): List<ItemDraft> = mapNotNull { line ->
+    val description = line.description.trim()
+    if (description.isEmpty()) return@mapNotNull null
+    val amountMinor = line.amountText.trim().takeIf { it.isNotEmpty() }?.let {
+        Money.parse(it, currency).amountMinor
+    }
+    ItemDraft(description = description, amountMinor = amountMinor)
+}
+
 /** 一张待确认的解析卡片，可就地编辑后再入账。 */
 data class DraftCard(
     val id: String,
@@ -45,6 +70,10 @@ data class DraftCard(
     val dateEpochDay: Long,
     val confidence: Float,
     val error: String? = null,
+    /** 发生地点。金额和商户都记不住时的最后一个锚点。 */
+    val place: String = "",
+    /** 小票明细，纯描述，不参与记账。 */
+    val items: List<ItemLine> = emptyList(),
 ) {
     val isHighConfidence: Boolean get() = confidence >= 0.8f
     val canSave: Boolean get() = amountText.isNotBlank() && categoryId.isNotBlank() && error == null
@@ -76,6 +105,8 @@ data class AddEntryUiState(
     val dateEpochDay: Long = 0L,
     val payee: String = "",
     val note: String = "",
+    val place: String = "",
+    val items: List<ItemLine> = emptyList(),
     val currency: String = "",
     val expenseCategories: List<AccountEntity> = emptyList(),
     val incomeCategories: List<AccountEntity> = emptyList(),
@@ -309,6 +340,20 @@ class AddEntryViewModel @Inject constructor(
 
     fun onCardDateChange(id: String, epochDay: Long) = updateCard(id) { it.copy(dateEpochDay = epochDay) }
 
+    fun onCardPlaceChange(id: String, text: String) = updateCard(id) { it.copy(place = text) }
+
+    fun onCardItemChange(id: String, index: Int, line: ItemLine) = updateCard(id) { card ->
+        card.copy(items = card.items.mapIndexed { i, existing -> if (i == index) line else existing })
+    }
+
+    fun onCardItemAdd(id: String) = updateCard(id) {
+        it.copy(items = it.items + ItemLine())
+    }
+
+    fun onCardItemRemove(id: String, index: Int) = updateCard(id) { card ->
+        card.copy(items = card.items.filterIndexed { i, _ -> i != index })
+    }
+
     fun onCardRemove(id: String) = _state.update { s ->
         baselines.remove(id)
         s.copy(
@@ -383,6 +428,7 @@ class AddEntryViewModel @Inject constructor(
                     val categoryId = card.categoryId.ifBlank {
                         categoryPool.firstOrNull()?.id ?: error("缺少分类")
                     }
+                    val itemDrafts = card.items.toItemDrafts(current.currency.ifBlank { "CNY" })
                     val draft = when (card.kind) {
                         EntryKind.INCOME -> JournalDraft.income(
                             dateEpochDay = card.dateEpochDay,
@@ -403,7 +449,10 @@ class AddEntryViewModel @Inject constructor(
                             note = card.note.ifBlank { null },
                             source = current.aiSource,
                         )
-                    }
+                    }.copy(
+                        place = card.place.trim().ifBlank { null },
+                        items = itemDrafts,
+                    )
                     repository.post(draft)
                 }
             }
@@ -467,6 +516,18 @@ class AddEntryViewModel @Inject constructor(
 
     fun onNoteChange(text: String) = _state.update { it.copy(note = text) }
 
+    fun onPlaceChange(text: String) = _state.update { it.copy(place = text) }
+
+    fun onItemChange(index: Int, line: ItemLine) = _state.update { s ->
+        s.copy(items = s.items.mapIndexed { i, existing -> if (i == index) line else existing })
+    }
+
+    fun onItemAdd() = _state.update { it.copy(items = it.items + ItemLine()) }
+
+    fun onItemRemove(index: Int) = _state.update { s ->
+        s.copy(items = s.items.filterIndexed { i, _ -> i != index })
+    }
+
     fun saveManual() {
         val current = _state.value
         if (!current.canSaveManual) return
@@ -481,6 +542,7 @@ class AddEntryViewModel @Inject constructor(
             return
         }
 
+        val itemDrafts = current.items.toItemDrafts(current.currency.ifBlank { "CNY" })
         val draft = when (current.kind) {
             EntryKind.EXPENSE -> JournalDraft.expense(
                 dateEpochDay = current.dateEpochDay,
@@ -507,7 +569,10 @@ class AddEntryViewModel @Inject constructor(
                 toAccountId = current.toAccountId,
                 note = current.note.ifBlank { null },
             )
-        }
+        }.copy(
+            place = current.place.trim().ifBlank { null },
+            items = itemDrafts,
+        )
 
         _state.update { it.copy(isSaving = true) }
         viewModelScope.launch {

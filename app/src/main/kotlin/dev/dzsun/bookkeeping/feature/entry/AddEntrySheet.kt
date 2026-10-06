@@ -230,6 +230,10 @@ private fun AiCaptureBody(
                 onPayeeChange = { viewModel.onCardPayeeChange(card.id, it) },
                 onNoteChange = { viewModel.onCardNoteChange(card.id, it) },
                 onDateChange = { viewModel.onCardDateChange(card.id, it) },
+                onPlaceChange = { viewModel.onCardPlaceChange(card.id, it) },
+                onItemChange = { index, line -> viewModel.onCardItemChange(card.id, index, line) },
+                onItemAdd = { viewModel.onCardItemAdd(card.id) },
+                onItemRemove = { viewModel.onCardItemRemove(card.id, it) },
                 onRemove = { viewModel.onCardRemove(card.id) },
             )
         }
@@ -295,17 +299,40 @@ private fun ManualSheetBody(state: AddEntryUiState, viewModel: AddEntryViewModel
         }
     }
 
-    // 备注
+    // 备注 / 地点
     OutlinedTextField(
         value = state.note,
         onValueChange = viewModel::onNoteChange,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp),
         placeholder = { Text("点击填写备注") },
         singleLine = true,
         shape = RoundedCornerShape(12.dp),
     )
+    PlaceField(
+        value = state.place,
+        onValueChange = viewModel::onPlaceChange,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+
+    // 明细（可选）：默认收起，别挤占数字键盘
+    var showItems by remember { mutableStateOf(false) }
+    TextButton(
+        onClick = { showItems = !showItems },
+        modifier = Modifier.padding(horizontal = 8.dp),
+    ) {
+        Text(if (showItems) "收起明细" else "明细（买了什么）")
+    }
+    if (showItems) {
+        ItemsEditor(
+            items = state.items,
+            onItemChange = viewModel::onItemChange,
+            onItemAdd = viewModel::onItemAdd,
+            onItemRemove = viewModel::onItemRemove,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+    }
 
     state.amountError?.let {
         Text(

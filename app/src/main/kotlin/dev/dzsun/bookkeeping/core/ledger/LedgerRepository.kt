@@ -18,6 +18,7 @@ import dev.dzsun.bookkeeping.core.platform.IdGenerator
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 /**
  * 账本的读写入口。
@@ -34,6 +35,15 @@ class LedgerRepository @Inject constructor(
 
     /** 账目投影：按日期倒序的全部收支记录。 */
     fun observeEntries(): Flow<List<LedgerRow>> = database.journalDao().observeLedgerRows()
+
+    /**
+     * 一笔账的列表投影（详情页用）。没有这笔时发 null。
+     *
+     * 复用 [observeEntries] 的同一口径，不再写一份 SQL——两处口径一旦漂移，
+     * 详情页就会显示与列表不一致的金额或分类。
+     */
+    fun observeEntry(journalId: String): Flow<LedgerRow?> =
+        database.journalDao().observeLedgerRows().map { rows -> rows.find { it.journalId == journalId } }
 
     /** 本位币，null 表示科目表还没建好。 */
     fun observeBaseCurrency(): Flow<String?> = database.accountDao().observeBaseCurrency()

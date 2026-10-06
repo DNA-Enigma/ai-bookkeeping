@@ -33,7 +33,17 @@ object EditFields {
     const val PAYEE = "payee"
     const val NOTE = "note"
     const val DATE = "date"
+    const val PLACE = "place"
+    const val ITEMS = "items"
 }
+
+/**
+ * 明细改动的文本形态，进 `edits[].from/to`。
+ * 格式：`描述:金额|描述:金额`；没填金额的行只留描述。
+ */
+fun List<ItemLine>.toEditText(): String =
+    filter { it.description.isNotBlank() }
+        .joinToString("|") { "${it.description.trim()}:${it.amountText.trim()}" }
 
 /**
  * 对比解析基线与用户改后的卡片，产出 `edits[{field, from, to}]`。
@@ -58,6 +68,12 @@ fun collectFieldEdits(baseline: DraftCard, current: DraftCard): List<FieldEdit> 
     }
     if (baseline.dateEpochDay != current.dateEpochDay) {
         edits += FieldEdit(EditFields.DATE, baseline.dateEpochDay.toString(), current.dateEpochDay.toString())
+    }
+    if (baseline.place != current.place) {
+        edits += FieldEdit(EditFields.PLACE, baseline.place, current.place)
+    }
+    if (baseline.items != current.items) {
+        edits += FieldEdit(EditFields.ITEMS, baseline.items.toEditText(), current.items.toEditText())
     }
     return edits
 }

@@ -874,3 +874,60 @@ capture_from_text / ledger.query / reconciliation / report / budget_plan…）�
 **构建绿，40 个单元测试 0 失败**（新增 `PhotoCaptureTest` 6 个）。
 纯文本那条路按你们的 P0-1 仍然当不可用；截图/拍照路径不受影响，可以开验。
 
+### 2026-10-06 · 界面这边（0.9.0：明细表有了生产者）
+
+按你说的三件事做完了。**设计约束照办**：明细不参与记账，**没做**「明细之和 == 总额」
+的对齐校验——单测里专门有一条盖着这个（`ItemLinesTest`），总额 38.50、明细之和 66.50
+照样入库。
+
+> 版本说明：工作区里有一笔并行提交 `1a2a4cc`（发现页，message 写了 0.8.0）把
+> `AppNavHost` 的详情路由一并收走了。所以这次明细/地点是 **0.9.0**（versionCode 7），
+> 避免撞号。`build.gradle` 里 0.6–0.8 的号一直没写上，这次补的是 0.9.0。
+
+**【1】确认卡片有明细和地点了。**
+
+`ParsedCard` 与手填表单都加了 `ItemsEditor`（描述 + 可选金额，可增删）和
+`PlaceField`。`JournalDraft.expense/income(...)` 工厂方法不收 `place`/`items`，
+所以走的是 `.copy(place=, items=)`——**没动你们的 `JournalDraft.kt`**。
+空描述的明细行在转换时丢掉（`toItemDrafts`），不会撞上你们那条
+「空描述被拒绝」的不变式。
+
+用户改动会进 `edits[]`，新增两个 field 名（和 `DraftCard` 字段一一对应）：
+
+```
+place | items
+```
+
+`items` 的 from/to 是 `描述:金额|描述:金额` 这种紧凑文本（`ItemLine.toEditText()`）。
+如果流程模板的 `confirmation` 段词表要别的写法，说一声。
+
+**【2】账目详情页是新的。** 路由 `entry/{journalId}`，点列表任意一行进去。
+明细显示在「买了什么」一节；没填单价的行**不硬凑金额**，只显示描述。
+底部有一句「明细只描述买了什么，记账金额以上方总额为准」——把你们那条约束
+写在了用户会看到的地方。
+
+手记一笔带明细验显示的路径：中央 + → 手动录入（`AddEntryScreen`）
+或记一笔面板里「明细（买了什么）」折叠区。面板里默认收起，不挤数字键盘。
+
+**【3】地点也接了。** 确认卡、手填表单、记一笔面板都有输入框；
+列表副标题也带上了（`payee · place · 对方账户`），免得只有进详情才看得见。
+
+#### 动了你们两个文件，说明理由
+
+| 文件 | 改了什么 | 为什么 |
+|---|---|---|
+| `LedgerDao.kt` | `LedgerRow` 加 `place: String?`，SQL 投影补一列 | 详情页和列表副标题要地点；不补就得再查一次 `journal` 表 |
+| `LedgerRepository.kt` | 加 `observeEntry(journalId): Flow<LedgerRow?>` | 详情页按 id 取一条。**复用 `observeLedgerRows()` 的同一口径**再 `find`，没另写 SQL——两处口径一漂，详情就会显示跟列表不一致的金额 |
+
+都是加法，没有破坏性改动。要改口径随时说。
+
+#### 顺带两件
+
+1. **版本号补上了。** 0.6.0–0.8.0 那几次提交的 message 写了版本，
+   但 `build.gradle.kts` 一直停在 0.5.0。这次推到 **0.9.0**（versionCode 7）。
+2. **`docs/dispatcher-issues.md` 你那份未提交改动我没碰**，还在工作区。
+   `core/statement/` 那批也是，看着像你正在写，不掺和。
+
+**构建绿，52 个单元测试 0 失败**（新增 `ItemLinesTest` 4 个 + `ClarificationTest`
+多 1 个 place/items 用例）。可以手记一笔带明细的账去验详情页了。
+

@@ -268,6 +268,10 @@ private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
                         onPayeeChange = { viewModel.onCardPayeeChange(card.id, it) },
                         onNoteChange = { viewModel.onCardNoteChange(card.id, it) },
                         onDateChange = { viewModel.onCardDateChange(card.id, it) },
+                        onPlaceChange = { viewModel.onCardPlaceChange(card.id, it) },
+                        onItemChange = { index, line -> viewModel.onCardItemChange(card.id, index, line) },
+                        onItemAdd = { viewModel.onCardItemAdd(card.id) },
+                        onItemRemove = { viewModel.onCardItemRemove(card.id, it) },
                         onRemove = { viewModel.onCardRemove(card.id) },
                     )
                 }
@@ -301,6 +305,10 @@ fun ParsedCard(
     onPayeeChange: (String) -> Unit,
     onNoteChange: (String) -> Unit,
     onDateChange: (Long) -> Unit,
+    onPlaceChange: (String) -> Unit,
+    onItemChange: (Int, ItemLine) -> Unit,
+    onItemAdd: () -> Unit,
+    onItemRemove: (Int) -> Unit,
     onRemove: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -367,6 +375,19 @@ fun ParsedCard(
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 1,
                 maxLines = 2,
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            PlaceField(value = card.place, onValueChange = onPlaceChange)
+
+            Spacer(Modifier.height(12.dp))
+
+            ItemsEditor(
+                items = card.items,
+                onItemChange = onItemChange,
+                onItemAdd = onItemAdd,
+                onItemRemove = onItemRemove,
             )
 
             Spacer(Modifier.height(8.dp))
@@ -527,6 +548,15 @@ private fun ManualEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel
             modifier = Modifier.fillMaxWidth(),
             minLines = 1,
             maxLines = 3,
+        )
+
+        PlaceField(value = state.place, onValueChange = viewModel::onPlaceChange)
+
+        ItemsEditor(
+            items = state.items,
+            onItemChange = viewModel::onItemChange,
+            onItemAdd = viewModel::onItemAdd,
+            onItemRemove = viewModel::onItemRemove,
         )
 
         TextButton(onClick = { showDatePicker = true }) {

@@ -25,6 +25,8 @@ data class LedgerRow(
     val counterpartyName: String,
     val amountMinor: Long,
     val currency: String,
+    /** 发生地点。详情页与列表副标题用它当「几周后想起来」的锚点。 */
+    val place: String? = null,
 )
 
 @Dao
@@ -79,6 +81,7 @@ interface JournalDao {
                j.note AS note,
                j.status AS status,
                j.source AS source,
+               j.place AS place,
                p.accountId AS categoryId,
                a.name AS categoryName,
                a.type AS categoryType,

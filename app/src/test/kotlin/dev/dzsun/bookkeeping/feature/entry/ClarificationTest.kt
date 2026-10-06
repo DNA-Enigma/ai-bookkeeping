@@ -21,6 +21,8 @@ class ClarificationTest {
         note: String = "打车",
         date: Long = 100L,
         confidence: Float = 0.9f,
+        place: String = "",
+        items: List<ItemLine> = emptyList(),
     ) = DraftCard(
         id = "c1",
         kind = kind,
@@ -30,6 +32,8 @@ class ClarificationTest {
         note = note,
         dateEpochDay = date,
         confidence = confidence,
+        place = place,
+        items = items,
     )
 
     @Test
@@ -54,6 +58,25 @@ class ClarificationTest {
         assertEquals(FieldEdit(EditFields.KIND, "EXPENSE", "INCOME"), edits.first { it.field == EditFields.KIND })
         assertEquals(FieldEdit(EditFields.AMOUNT, "30", "31"), edits.first { it.field == EditFields.AMOUNT })
         assertEquals(FieldEdit(EditFields.DATE, "100", "101"), edits.first { it.field == EditFields.DATE })
+    }
+
+    @Test
+    fun `place and items edits are reported as their own fields`() {
+        val baseline = card(
+            place = "国贸",
+            items = listOf(ItemLine("拿铁 大杯", "38.00")),
+        )
+        val current = card(
+            place = "公司楼下",
+            items = listOf(ItemLine("拿铁 大杯", "38.00"), ItemLine("纸杯蛋糕")),
+        )
+        val edits = collectFieldEdits(baseline, current)
+        assertEquals(2, edits.size)
+        assertEquals(FieldEdit(EditFields.PLACE, "国贸", "公司楼下"), edits.first { it.field == EditFields.PLACE })
+        assertEquals(
+            FieldEdit(EditFields.ITEMS, "拿铁 大杯:38.00", "拿铁 大杯:38.00|纸杯蛋糕:"),
+            edits.first { it.field == EditFields.ITEMS },
+        )
     }
 
     @Test

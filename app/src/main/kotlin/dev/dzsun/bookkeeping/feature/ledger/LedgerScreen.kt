@@ -66,6 +66,7 @@ private val dayHeadingFormatter = DateTimeFormatter.ofPattern("M月d日 EEEE", L
 @Composable
 fun LedgerScreen(
     onAddEntry: () -> Unit,
+    onEntryClick: (String) -> Unit = {},
     viewModel: LedgerViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -94,7 +95,11 @@ fun LedgerScreen(
                         DayHeading(epochDay, rows)
                     }
                     items(rows, key = { it.journalId }) { row ->
-                        EntryRow(row, hideAmounts)
+                        EntryRow(
+                            row = row,
+                            hideAmounts = hideAmounts,
+                            onClick = { onEntryClick(row.journalId) },
+                        )
                     }
                 }
             }
@@ -324,12 +329,13 @@ private fun DayHeading(epochDay: Long, rows: List<LedgerRow>) {
 }
 
 @Composable
-private fun EntryRow(row: LedgerRow, hideAmounts: Boolean) {
+private fun EntryRow(row: LedgerRow, hideAmounts: Boolean, onClick: () -> Unit = {}) {
     val isIncome = row.categoryType == AccountType.INCOME
     val amount = Money.of(abs(row.amountMinor), row.currency)
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -351,6 +357,7 @@ private fun EntryRow(row: LedgerRow, hideAmounts: Boolean) {
             Text(row.categoryName, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
             val subtitle = listOfNotNull(
                 row.payee?.takeIf { it.isNotBlank() },
+                row.place?.takeIf { it.isNotBlank() },
                 row.counterpartyName.takeIf { it.isNotBlank() },
             ).joinToString(" · ")
             if (subtitle.isNotBlank()) {
