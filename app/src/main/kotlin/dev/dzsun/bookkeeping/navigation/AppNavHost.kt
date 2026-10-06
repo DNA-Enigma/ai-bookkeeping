@@ -50,6 +50,7 @@ object Routes {
     const val DISCOVER = "discover"
     const val SETTINGS = "settings"
     const val ENTRY_DETAIL = "entry/{journalId}"
+    const val IMPORT = "import"
 
     fun entryDetail(journalId: String) = "entry/$journalId"
 }
@@ -79,7 +80,8 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     var showAddSheet by remember { mutableStateOf(false) }
-    val isDetail = currentRoute?.startsWith("entry/") == true
+    val isDetail = currentRoute?.startsWith("entry/") == true ||
+        currentRoute == Routes.IMPORT
 
     Scaffold(
         bottomBar = {
@@ -129,7 +131,15 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
                 DiscoverScreen()
             }
             composable(Routes.SETTINGS) {
-                SettingsScreen()
+                SettingsScreen(
+                    onImportClick = { navController.navigate(Routes.IMPORT) },
+                )
+            }
+            composable(Routes.IMPORT) {
+                dev.dzsun.bookkeeping.feature.importer.ImportScreen(
+                    onBack = { navController.popBackStack() },
+                    onDone = { navController.popBackStack() },
+                )
             }
             composable(
                 route = Routes.ENTRY_DETAIL,

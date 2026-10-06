@@ -16,8 +16,8 @@ android {
         applicationId = "dev.dzsun.bookkeeping"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.9.1"
+        versionCode = 9
+        versionName = "0.10.0"
     }
 
     buildTypes {

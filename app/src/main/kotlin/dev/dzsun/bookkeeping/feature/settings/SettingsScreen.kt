@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Palette
@@ -60,7 +61,10 @@ import dev.dzsun.bookkeeping.core.update.UpdateManifest
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
+fun SettingsScreen(
+    onImportClick: () -> Unit = {},
+    viewModel: SettingsViewModel = hiltViewModel(),
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var darkMode by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -113,6 +117,36 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                     subtitle = "${state.accounts.size} 个 · 币种 ${state.currency}",
                     items = state.accounts,
                 )
+            }
+
+            // 数据
+            item { SectionTitle("数据") }
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onImportClick)
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Default.FileDownload, contentDescription = null)
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("导入流水", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "微信、支付宝、银行账单 · 先预览再入库",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
 
             // 偏好
