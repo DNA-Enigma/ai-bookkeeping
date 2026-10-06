@@ -94,7 +94,10 @@ class CaptureClient @Inject constructor(
 
             TaskEvent.TYPE_TASK_COMPLETED -> {
                 val snapshot = client.getTask(taskId)
-                val resolved = fields ?: snapshot.receiptFieldsFromArtifacts()
+                val entry = snapshot.entryFromArtifacts()
+                val resolved = fields
+                    ?: entry?.toReceiptFields()
+                    ?: snapshot.fieldsFromArtifacts()
                 if (resolved == null) {
                     CaptureOutcome.Failed(
                         taskId,
@@ -108,7 +111,7 @@ class CaptureClient @Inject constructor(
                         null,
                     )
                 } else {
-                    CaptureOutcome.Completed(taskId, resolved)
+                    CaptureOutcome.Completed(taskId, resolved, entry)
                 }
             }
 
@@ -131,13 +134,34 @@ class CaptureClient @Inject constructor(
     }
 
     /**
-     * 终态快照里也可能带着产物。契约说失败时保留已完成的产物，
-     * 而实测中 `extract` 成功了却因为下游超时整单失败——这条路必须能兜住。
+     * 终态快照里的产物。**形状随路由而变**，实测至少两种：
+     * 单步工具是 `{main: {entry: {…}}}`，票据流程按节点分。
+     * 所以这里递归找，而不是假定某个固定键——原来写死取 `artifacts["extract"]`，
+     * 遇到单步工具那种形状会误判成「成功但没产物」。
      */
-    private fun TaskSnapshot.receiptFieldsFromArtifacts(): ReceiptFields? {
-        val artifacts = artifacts ?: return null
-        val candidate = artifacts[SUBTASK_EXTRACT]?.let { it as? JsonObject } ?: artifacts
-        return runCatching { json.decodeFromJsonElement(ReceiptFields.serializer(), candidate) }.getOrNull()
+    private fun TaskSnapshot.entryFromArtifacts(): LedgerEntry? =
+        artifacts?.nestedObjects()
+            ?.mapNotNull { it["entry"] as? JsonObject }
+            ?.firstNotNullOfOrNull { decodeOrNull(LedgerEntry.serializer(), it) }
+
+    /** 退路：有些路由直接把字段摊在节点产物上，没有 `entry` 包一层。 */
+    private fun TaskSnapshot.fieldsFromArtifacts(): ReceiptFields? =
+        artifacts?.nestedObjects()
+            ?.filter { it.containsKey("amount") && it.containsKey("currency") }
+            ?.firstNotNullOfOrNull { decodeOrNull(ReceiptFields.serializer(), it) }
+
+    private fun <T> decodeOrNull(
+        serializer: kotlinx.serialization.DeserializationStrategy<T>,
+        element: JsonObject,
+    ): T? = runCatching { json.decodeFromJsonElement(serializer, element) }.getOrNull()
+
+    /** 先自己、再逐层往里，产出所有嵌套对象。 */
+    private fun JsonObject.nestedObjects(): Sequence<JsonObject> = sequence {
+        yield(this@nestedObjects)
+        for ((_, value) in this@nestedObjects) {
+            val child = value as? JsonObject ?: continue
+            yieldAll(child.nestedObjects())
+        }
     }
 
     private companion object {

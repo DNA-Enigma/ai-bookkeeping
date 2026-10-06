@@ -562,3 +562,78 @@ installer.install(apk)
 **目前还没法端到端验证**——因为触发入口在设置页，还没接。你接上按钮后我在模拟器里
 走一遍：装旧版 → 服务端换成新版 → 检查 → 下载 → 校验 → 拉起系统安装页。
 
+### 2026-10-06 · 数据层这边（**我写错了三个 DTO，编译错误是我故意的**）
+
+在模拟器上真跑了一遍 AI 记账，拿到活的澄清下发，然后照实测把 `Contract.kt` 里三个
+地方改了。**现在你会看到 3 个编译错误，每个都精确指向要改的位置**——那是我有意让
+编译器拦住的，不是意外。
+
+先说清楚：**这三个错误都是我先写错的，你只是照着我的注释写。**
+
+**1. `ClarificationAnswer.optionId` → `answerId`（且可空）+ 新增 `freeText`**
+
+我原来建的字段叫 `option_id`，但契约的 `/tasks/{task_id}/clarify` 请求体里是
+**`answer_id`**。更麻烦的是这个端点**用裸 `request.json()`、没有 Pydantic 校验**，
+所以传错字段名**不会报错，只会被静默忽略**——用户答了等于没答。
+
+从错误里看你在 `AddEntryViewModel.kt:340` 用的是 `optionId`。改成：
+
+```kotlin
+clarificationPort.answer(
+    taskId,
+    ClarificationAnswer(
+        questionId = it.questionId,
+        answerId = optionId,        // 按下发选项回答时
+        // freeText = it,           // 或者自由文本回答
+    ),
+)
+```
+
+**`freeText` 不是可有可无的**：实测里评估器下发的澄清是
+`{question: "请补充金额和支付方式…", options: []}` —— **选项是空的**。
+那种情况下 `answer_id` 无从填起，只能走 `freeText`。
+**所以确认页必须留一个自由输入的口子，不能只渲染选项按钮**，否则用户面对
+一个没有按钮的问题就卡死了。我用 `free_text` 答复后任务正常恢复并 `succeeded`。
+
+**2. clarify 的 `edits` 是键值对对象，不是 `[FieldEdit]` 数组**
+
+`AddEntryViewModel.kt:341` 那里传了 `List<FieldEdit>`。但服务端是这么用的
+（`pipeline.py:676`）：
+
+```python
+prior = {**prior, **answer["edits"]}    # 合并进 partial_profile
+```
+
+传数组会 `TypeError`，**500**。而且这两处的 `edits` 根本不是一回事：
+
+| | 形状 | 含义 |
+|---|---|---|
+| `clarify.edits` | `{key: value}` 对象 | 补充画像，免得评估器重问 |
+| `feedback.edits` | `[{field, from, to}]` 数组 | 自进化的真值标注 |
+
+**字段级的修改应该走 `feedback`，不是 `clarify` 的 edits。** 我把它改成
+`JsonObject?` 了，clarify 时不传也没问题（可空）。
+
+**3. `TaskFeedback.verdict` 现在是枚举，`confirmed` 不是合法值**
+
+`AddEntryViewModel.kt:413` 传的 `"confirmed"` —— 那个词**是我在注释里编的**，
+照着文档示例猜的。契约的封闭词表是 **`accepted` / `edited` / `rejected` / `ignored`**。
+
+改成：
+
+```kotlin
+TaskFeedback(
+    verdict = if (edits.isEmpty()) FeedbackVerdict.ACCEPTED else FeedbackVerdict.EDITED,
+    edits = edits,
+)
+```
+
+用枚举是为了**让编译器挡住**——那个端点同样没有校验，错值只会被丢掉，
+而这是自进化最值钱的输入，悄悄丢了等于白做一次人工核对。
+
+**顺带一个好消息**：AI 记账那条路**通了**。文本任务 → 澄清 → 用 `free_text` 答复 →
+`succeeded`，产物 `artifacts.main.entry` 里字段齐全。截图/相机入口还没接
+（`onPhotoCaptured` 在 ViewModel 里但没有调用点），接上之后那条路也能跑——
+调度层那边唯一的不确定是 routing 偶尔会把纯文本分解到票据模板上去（间歇性，
+我报告里已改措辞）。
+

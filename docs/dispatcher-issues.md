@@ -11,9 +11,13 @@
 
 ---
 
-## P0-1　纯文本记账被套用需要图片的流程模板，必然失败
+## P0-1　纯文本记账会被套用需要图片的流程模板（**间歇性**）
 
-**`bookkeeping.capture_from_text` 目前完全不可用。**
+> **2026-10-06 修正**：这条最初被我写成「必然失败」，那是**错的**。
+> 后续用另一段文本（`lunch 38`）复现时，路由走的是 `single_tool_action`、
+> `decompose: false`，任务正常跑完并 `succeeded`。**路由是 LLM 判断，
+> 同一个意图的失败取决于当次路由选了什么**，所以这是间歇性缺陷而非必现。
+> 下面这个复现仍然是真实发生过的，但不要理解成「这条意图完全不能用」。
 
 复现：
 
@@ -117,8 +121,64 @@ config/routing.policy.yaml:300:  node_defaults:                        # 仅配�
 { "duplicate": false, "matched_entry_id": null }
 ```
 
-`LedgerEntry` / `Merchant` 因为 `normalize` 挂掉还没拿到。
+**`bookkeeping.LedgerEntry`** —— 取自一次跑通的任务的 `artifacts.main.entry`
+（文本记账，路由 `single_tool_action`，澄清用 `free_text` 答复后 `succeeded`）：
+
+```jsonc
+{ "amount": 38.0, "currency": "CNY", "merchant": null, "category": "lunch",
+  "direction": "expense", "id": "e_1", "_token": "task_…:main" }
+```
+
+`_token` 与契约承诺的「按 `(task_id, subtask_id)` 派生的稳定幂等 token」一致。
+
+`Merchant` 仍未拿到（`normalize` 那步还没跑通过）。
 **建议补上这四个 schema**，消费端已经照实测形状写了映射，形状一冻结才好对齐。
+
+---
+
+## P1-4b　`clarify` 与 `feedback` 的 `edits` 同名不同形，且 clarify 端点没有校验
+
+两处的 `edits` 形状与含义都不同：
+
+| 端点 | 形状 | 含义 |
+|---|---|---|
+| `clarify` | `type: [object, "null"]` | `prior = {**prior, **edits}` —— **合并进 partial_profile** |
+| `feedback` | `[{field, from, to}]` 数组 | 自进化的真值标注 |
+
+同名不同形本身容易混，更麻烦的是**两个端点都用裸 `request.json()`，没有 Pydantic 校验**：
+
+- `clarify` 传了数组 → `{**prior, **list}` 抛 `TypeError` → **500**
+- 传了契约里不存在的字段名（比如把 `answer_id` 写成 `option_id`）→ **静默忽略**，
+  用户答了等于没答，而且不报错
+
+第二类尤其危险：客户端写错字段名不会有任何反馈。**建议给这两个端点加上请求模型校验**
+（哪怕只是 `extra="forbid"`），让错值在边界上就被拒。
+
+另外 `clarify` 的 `edits` 语义在 openapi 里只写了「用户对已抽取字段的修改」，
+但实现是拿它补画像的。**两处描述应统一**，否则消费端会把字段修正发到这里，
+而它其实该走 `feedback`。
+
+---
+
+## 补充：澄清可能没有选项，客户端必须有自由文本入口
+
+实测评估器下发的澄清：
+
+```jsonc
+{ "question_id": "q_411d83ab",
+  "question": "你想记一笔关于午餐的账吗？请补充金额和支付方式（如现金/微信/支付宝）。",
+  "options": [],          // ← 空
+  "blocking": true }
+```
+
+`options` 为空，而契约的状态机要求 `blocking: true` 的任务必须答复才能继续。
+此时唯一的路是 `free_text`（实现侧 `reply = answer.get("free_text") or answer.get("answer_id")`）。
+
+**建议**：在 `PendingClarification` 的文档里写明「`options` 可以为空，此时客户端
+应提供自由文本输入」。否则界面按「渲染选项按钮」实现，用户会撞上一个没有按钮的问题。
+
+（实测确认：用 `free_text` 答复后任务从 `awaiting_clarification` 正常恢复到
+`succeeded`，这条路本身是通的。）
 
 ---
 

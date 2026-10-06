@@ -45,6 +45,37 @@ data class ReceiptFields(
     }
 }
 
+/**
+ * `bookkeeping.LedgerEntry` —— 真正写进账本的那条记录。
+ *
+ * 同样是实测形状（`single_tool_action` 路由跑通后的 `artifacts.main.entry`）：
+ * `{amount: 38.0, currency: "CNY", merchant: null, category: "lunch",
+ *   direction: "expense", id: "e_1", _token: "task_…:main"}`
+ *
+ * `_token` 是调度层按 `(task_id, subtask_id)` 派生的稳定幂等 token，
+ * 与契约承诺的一致。
+ */
+@Serializable
+data class LedgerEntry(
+    val amount: JsonElement? = null,
+    val currency: String? = null,
+    val merchant: String? = null,
+    val category: String? = null,
+    val direction: String? = null,
+    val id: String? = null,
+    @SerialName("_token") val token: String? = null,
+) {
+    /** 折算成确认卡片要的那种字段视图。没提到的字段留空，不编造。 */
+    fun toReceiptFields(): ReceiptFields = ReceiptFields(
+        amount = amount,
+        currency = currency,
+        merchant = merchant,
+        direction = direction,
+        confidence = null,
+        notes = category?.let { "服务端归类：$it" },
+    )
+}
+
 /** `bookkeeping.DedupeResult`，同样是实测形状。 */
 @Serializable
 data class DedupeResult(
@@ -72,6 +103,11 @@ sealed interface CaptureOutcome {
     data class Completed(
         override val taskId: String,
         val fields: ReceiptFields,
+        /**
+         * 服务端真正写库的那条记录。**可选**：不是每条路由都会给
+         * （实测 `single_tool_action` 会给 `artifacts.main.entry`，与 [fields] 同源）。
+         */
+        val entry: LedgerEntry? = null,
     ) : CaptureOutcome
 
     data class Failed(

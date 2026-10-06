@@ -255,13 +255,37 @@ data class ClarificationOption(
     val label: String,
 )
 
-/** 澄清答复。`edits` 是自进化最值钱的输入：它同时给出错在哪（field）和对的是什么（to）。 */
+/**
+ * 澄清答复。
+ *
+ * 字段名与可空性照 `openapi.yaml` 的 `/tasks/{task_id}/clarify` 请求体：
+ * `question_id` 必填，`answer_id` / `free_text` / `edits` 都可空。
+ *
+ * ⚠️ **服务端会下发没有选项的澄清。** 实测中评估器给出的就是一个只有
+ * `question`、`options: []` 的问题（「请补充金额和支付方式」）。那种情况下
+ * 只能走 [freeText]，界面上必须留一个自由输入的口子，不能只渲染选项按钮。
+ *
+ * ⚠️ [edits] 与 [TaskFeedback.edits] **形状和含义都不一样**：
+ * 这边是会被 `{**prior, **edits}` 合并进 partial_profile 的**键值对对象**，
+ * 那边是 `[{field, from, to}]` 的**数组**（自进化的真值标注）。
+ * 往这边传数组会让服务端 `TypeError` 直接 500。
+ */
 @Serializable
 data class ClarificationAnswer(
     @SerialName("question_id") val questionId: String,
-    @SerialName("option_id") val optionId: String,
-    val edits: List<FieldEdit> = emptyList(),
-)
+    /** 选项 id。按下发选项回答时用它；自由文本回答时为 null。 */
+    @SerialName("answer_id") val answerId: String? = null,
+    /** 自由文本回答。服务端没给选项时唯一可用的路。 */
+    @SerialName("free_text") val freeText: String? = null,
+    /** 补充画像的键值对，会被合并进 partial_profile。**不是** [FieldEdit] 列表。 */
+    val edits: JsonObject? = null,
+) {
+    init {
+        require(!answerId.isNullOrBlank() || !freeText.isNullOrBlank()) {
+            "澄清答复必须给出 answer_id 或 free_text，否则等于没回答"
+        }
+    }
+}
 
 @Serializable
 data class FieldEdit(
@@ -270,14 +294,36 @@ data class FieldEdit(
     val to: String,
 )
 
-/** 人工质量信号。记账场景的自然采集点就是确认/修改页。 */
+/**
+ * 人工质量信号。记账场景的自然采集点就是确认/修改页。
+ *
+ * `verdict` 用枚举而不是字符串：契约里它是**封闭词表**
+ * （`accepted` / `edited` / `rejected` / `ignored`），传别的值会被服务端拒。
+ * 早先这里写成 `confirmed` —— 那是我照着文档示例猜的，词表里根本没有这个词，
+ * 而且端点没有 Pydantic 校验，错值不会报错只会被丢掉。
+ */
 @Serializable
 data class TaskFeedback(
-    /** 如 confirmed / edited / rejected。 */
-    val verdict: String,
+    val verdict: FeedbackVerdict,
     val edits: List<FieldEdit> = emptyList(),
     val reason: String? = null,
 )
+
+/** `verdict` 的封闭词表。取值见 `openapi.yaml` 的 `/tasks/{task_id}/feedback`。 */
+@Serializable
+enum class FeedbackVerdict {
+    /** 用户核对无误，直接采纳。 */
+    @SerialName("accepted") ACCEPTED,
+
+    /** 用户改过字段。配合 [TaskFeedback.edits] 就是一条带真值的标注。 */
+    @SerialName("edited") EDITED,
+
+    /** 用户放弃这笔。 */
+    @SerialName("rejected") REJECTED,
+
+    /** 未表态。 */
+    @SerialName("ignored") IGNORED,
+}
 
 /**
  * 事件流的一帧，**按 SSE 线格式**建模（不是 `schemas/event.json` 里日志记录的形状）。
