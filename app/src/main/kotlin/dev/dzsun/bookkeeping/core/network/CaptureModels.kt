@@ -28,6 +28,14 @@ data class ReceiptFields(
     /** 归类，取值来自用户自己的分类词表（不是代码里的常量）。 */
     val category: String? = null,
     val confidence: Double? = null,
+    /**
+     * 字段级置信度，如 `{"amount": 0.95, "merchant": 0.8}`。
+     *
+     * ⚠️ **当前服务端并不产出这个字段**（`schemas/bookkeeping_receipt_fields.json`
+     * 里没有，`grep field_confidence` 在 dispatcher 全仓为空）。这里按可空透出，
+     * 是照 PM 定死的界面契约先留好口子——真加上了就能直接用，没有也不影响。
+     */
+    @SerialName("field_confidence") val fieldConfidence: Map<String, Float>? = null,
     val notes: String? = null,
 ) {
     /** 金额，转成整数最小单位的 [Money]；缺金额或币种时返回 null。 */
@@ -38,11 +46,9 @@ data class ReceiptFields(
     }
 
     val isExpense: Boolean get() = direction != DIRECTION_INCOME
-    val isHighConfidence: Boolean get() = (confidence ?: 0.0) >= CONFIDENCE_THRESHOLD
 
     companion object {
         const val DIRECTION_INCOME = "income"
-        const val CONFIDENCE_THRESHOLD = 0.8
     }
 }
 
@@ -125,6 +131,19 @@ sealed interface CaptureOutcome {
          * （实测 `single_tool_action` 会给 `artifacts.main.entry`，与 [fields] 同源）。
          */
         val entry: LedgerEntry? = null,
+        /**
+         * 整体识别置信度，**null 表示拿不到**。
+         *
+         * 拿不到有三种来路，都不是异常：老服务端不给；走 `single_tool_action`
+         * 的纯文本路由产物里根本没有这个字段；事件流断了、客户端只回看到
+         * `LedgerEntry`（那种产物只带方向与分类，不带置信度）。
+         *
+         * 消费方（见 `core/ledger/ConfidenceGate`）**必须把 null 当成"不可信"**，
+         * 而不是"默认可信"——不知道可不可信的时候多问一句，远比记错一笔便宜。
+         */
+        val confidence: Float? = null,
+        /** 字段级置信度。服务端暂未产出，见 [ReceiptFields.fieldConfidence]。 */
+        val fieldConfidence: Map<String, Float>? = null,
     ) : CaptureOutcome
 
     data class Failed(
@@ -165,9 +184,12 @@ sealed interface CaptureOutcome {
 
             if (snapshot.status == TaskSnapshot.STATUS_SUCCEEDED) {
                 val entry = snapshot.artifacts.ledgerEntry()
+                // 顺序要紧：**先抽取产物、后凭证**。票据流程的快照里两者同时存在，
+                // 而凭证不带置信度——先取凭证就会把 `confidence` 丢掉，
+                // 偏偏那条路（事件流断了只能回看快照）最该问用户一句。
                 val resolved = fields
-                    ?: entry?.toReceiptFields()
                     ?: snapshot.artifacts.receiptFields()
+                    ?: entry?.toReceiptFields()
                 return if (resolved == null) {
                     Failed(
                         taskId,
@@ -181,7 +203,16 @@ sealed interface CaptureOutcome {
                         null,
                     )
                 } else {
-                    Completed(taskId, resolved, entry)
+                    // 置信度跟着 [resolved] 走：事件流那条路拿到的 extract 产物带它，
+                    // 回看快照那条路若只找到 LedgerEntry（无置信度）就给 null——
+                    // 宁可让消费方多问一句，也不要在这里编一个数出来
+                    Completed(
+                        taskId = taskId,
+                        fields = resolved,
+                        entry = entry,
+                        confidence = resolved.confidence?.toFloat(),
+                        fieldConfidence = resolved.fieldConfidence,
+                    )
                 }
             }
 
@@ -254,10 +285,22 @@ internal fun JsonObject?.ledgerEntry(): LedgerEntry? =
         ?.filter { it.containsKey(LedgerEntry.KEY_ENTRY_ID) }
         ?.firstNotNullOfOrNull { decodeOrNull(LedgerEntry.serializer(), it) }
 
-/** 退路：有些路由把字段直接摊在节点产物上，没有 `entry_id` 可判别。 */
+/**
+ * 抽取出来的字段（`extract` 节点的产物），**不包括凭证对象**。
+ *
+ * 判别方式是有没有 `entry_id`：凭证（`write` / `main`）一定有，
+ * 抽取产物一定没有。这条区分要紧——**置信度只有抽取产物才有**。
+ * 票据流程的快照里 `extract` 与 `write` 同时存在，若把凭证也算进"抽取字段"，
+ * 取到凭证就会把 `confidence: 0.95` 丢掉（凭证里没有这个字段），
+ * 而那条路正是「事件流断了、只能回看快照」——最该问用户一句的时候。
+ *
+ * 凭证那条路另有 [LedgerEntry.toReceiptFields]，它会把 `occurred_at` 映射成
+ * `datetime`；两者分工明确，不互相顶替。
+ */
 internal fun JsonObject?.receiptFields(): ReceiptFields? =
     this?.nestedObjects()
         ?.filter { it.containsKey("amount") && it.containsKey("currency") }
+        ?.filterNot { it.containsKey(LedgerEntry.KEY_ENTRY_ID) }
         ?.firstNotNullOfOrNull { decodeOrNull(ReceiptFields.serializer(), it) }
 
 private fun <T> decodeOrNull(

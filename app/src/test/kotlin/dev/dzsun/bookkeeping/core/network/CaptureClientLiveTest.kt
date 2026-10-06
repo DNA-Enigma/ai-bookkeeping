@@ -114,6 +114,13 @@ class CaptureClientLiveTest {
                 // 服务端归类的产物：entry 必须被认出来，否则分类名和幂等 id 都丢了
                 assertNotNull("必须能从 artifacts 里认出 LedgerEntry", outcome.entry)
                 assertNotNull("LedgerEntry 必须带稳定的 entry_id", outcome.entry?.entryId)
+                // P0-a 的输入：收据走 vision_extract_then_write，extract 一定给置信度。
+                // 它要是没了，自动入账会静默退化成"每笔都问"——不报错，只是白问一场
+                assertNotNull("收据路径应透出整体置信度", outcome.confidence)
+                assertTrue(
+                    "置信度应落在 0..1：${outcome.confidence}",
+                    outcome.confidence!! in 0f..1f,
+                )
             }
 
             is CaptureOutcome.NeedsClarification -> {

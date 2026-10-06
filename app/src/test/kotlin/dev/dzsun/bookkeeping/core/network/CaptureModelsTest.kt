@@ -1,5 +1,6 @@
 package dev.dzsun.bookkeeping.core.network
 
+import dev.dzsun.bookkeeping.core.ledger.ConfidenceGate
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -39,7 +40,7 @@ class CaptureModelsTest {
 
         assertEquals("星巴克咖啡（国贸店）", fields.merchant)
         assertTrue(fields.isExpense)
-        assertTrue(fields.isHighConfidence)
+        assertEquals(0.9, fields.confidence!!, 1e-6)
         // 38.5 走 JSON 字面量 → BigDecimal → 最小单位整数，全程不经过 Double
         assertEquals(3850L, fields.money()?.amountMinor)
         assertEquals("CNY", fields.money()?.currency)
@@ -60,10 +61,25 @@ class CaptureModelsTest {
     }
 
     @Test
-    fun `低置信度不算高置信`() {
-        assertFalse(ReceiptFields(confidence = 0.72).isHighConfidence)
-        // 没有置信度字段时按 0 处理——宁可不信，也不假装可信
-        assertFalse(ReceiptFields().isHighConfidence)
+    fun `置信度是可空的，没给时不编一个`() {
+        // 「够不够可信」的判定不在这里——它属于 core/ledger 的 ConfidenceGate，
+        // 阈值是可配的，写死在这个数据类里迟早和用户在设置里调的值对不上
+        assertEquals(0.72, ReceiptFields(confidence = 0.72).confidence!!, 1e-6)
+        assertNull(ReceiptFields().confidence)
+    }
+
+    @Test
+    fun `字段级置信度按可空透出，服务端没给就是 null`() {
+        // 服务端当前不产出 field_confidence（dispatcher 全仓 grep 为空），
+        // 但界面契约里留了这个口子——来了能直接用，没有也不该崩
+        assertNull(ReceiptFields().fieldConfidence)
+        val withFields = json.decodeFromJsonElement(
+            ReceiptFields.serializer(),
+            obj("""{"amount": 38.5, "currency": "CNY", "confidence": 0.9,
+                    "field_confidence": {"amount": 0.95, "merchant": 0.8}}"""),
+        )
+        assertEquals(0.95f, withFields.fieldConfidence?.get("amount"))
+        assertEquals(0.8f, withFields.fieldConfidence?.get("merchant"))
     }
 
     // ---------- bookkeeping.LedgerEntry ----------
@@ -239,6 +255,110 @@ class CaptureModelsTest {
         assertEquals("请补充金额和支付方式", c.clarification.question)
         // 实测服务端会下发空 options，那时只能走自由文本——渲染器必须知道这一点
         assertTrue(c.clarification.options.isEmpty())
+    }
+
+    @Test
+    fun `成功的任务把整体置信度透出来，供界面判断要不要问用户`() {
+        val succeeded = snapshot(
+            """
+            {"task_id": "task_q", "user_id": "local", "status": "succeeded", "source": "api",
+             "mode": "async", "progress": 1.0,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "artifacts": {"extract": {"amount": 38.5, "currency": "CNY",
+                                       "merchant": "星巴克咖啡（国贸店）",
+                                       "direction": "expense", "confidence": 0.98}}}
+            """,
+        )
+
+        val done = CaptureOutcome.fromSnapshot("task_q", succeeded, null) as CaptureOutcome.Completed
+        assertEquals(0.98f, done.confidence)
+    }
+
+    @Test
+    fun `票据流程的快照里 extract 与 write 并存时，置信度来自 extract`() {
+        // 这是**真实成功快照的形状**（实测 task_93cbd74c70d14b63bd8a）：
+        // extract / normalize / dedupe / write 四个节点都在，extract 带 confidence，
+        // write 是凭证、不带。事件流断了只能回看快照时走的就是这条路。
+        // 若先取凭证，0.95 会被丢掉 → 一律要确认 → 高置信直接入账这条产品决定失效。
+        val succeeded = snapshot(
+            """
+            {"task_id": "task_p", "user_id": "local", "status": "succeeded", "source": "api",
+             "mode": "async", "progress": 1.0,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "artifacts": {
+               "extract": {"amount": 38.5, "currency": "CNY", "merchant": "星巴克咖啡（国贸店）",
+                           "datetime": "2026-10-06 14:32:07", "payment_method": "零钱",
+                           "direction": "expense", "confidence": 0.95,
+                           "notes": "商品说明：拿铁 大杯"},
+               "normalize": {"merchant_normalized": "星巴克咖啡（国贸店）", "category": "餐饮",
+                             "confidence": 0.7},
+               "dedupe": {"duplicate": false, "matched_entry_id": null},
+               "write": {"entry_id": "task_p:write", "amount": 38.5, "currency": "CNY",
+                         "direction": "expense", "category": "餐饮",
+                         "merchant": "星巴克咖啡（国贸店）",
+                         "occurred_at": "2026-10-06 14:32:07", "source_task": "task_p",
+                         "note": "商品说明：拿铁 大杯"}}}
+            """,
+        )
+
+        val done = CaptureOutcome.fromSnapshot("task_p", succeeded, null) as CaptureOutcome.Completed
+
+        assertEquals("置信度必须来自 extract，不能被凭证顶掉", 0.95f, done.confidence)
+        assertTrue(ConfidenceGate.canAutoPost(done.confidence, 0.85f))
+        // 凭证本身仍然要认出来——落库要用它的 entry_id 做幂等
+        assertEquals("task_p:write", done.entry?.entryId)
+        assertEquals("餐饮", done.entry?.category)
+        // 字段也取自 extract：它有 datetime，凭证那侧只有 occurred_at
+        assertEquals("2026-10-06 14:32:07", done.fields.datetime)
+        assertEquals("零钱", done.fields.paymentMethod)
+    }
+
+    @Test
+    fun `只回看到 LedgerEntry 时置信度是 null，不能编一个数`() {
+        // 这条是「事件流断了」那条路的形状：快照里只有 write 节点的产出，
+        // 而 LedgerEntry 只带方向与分类，**不带置信度**。
+        // 编一个 1.0 出来就等于在这条路上静默跳过用户确认——那正是最该问一句的时候
+        val succeeded = snapshot(
+            """
+            {"task_id": "task_r", "user_id": "local", "status": "succeeded", "source": "api",
+             "mode": "async", "progress": 1.0,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "artifacts": {"write": {"entry_id": "task_r:write", "amount": 38.5,
+                                     "currency": "CNY", "direction": "expense",
+                                     "category": "餐饮", "source_task": "task_r"}}}
+            """,
+        )
+
+        val done = CaptureOutcome.fromSnapshot("task_r", succeeded, null) as CaptureOutcome.Completed
+        assertNull(done.confidence)
+        // 拿不到就得问——这个组合才是保守的那一侧
+        assertTrue(ConfidenceGate.requiresConfirmation(done.confidence, 0.85f))
+    }
+
+    @Test
+    fun `事件流先拿到产物时以它为准，置信度跟着一起带出来`() {
+        // 流里 extract 的产物比快照先到，而且带置信度；快照那条路可能只找到 LedgerEntry。
+        // 所以消费方拿到的是流里那份——不能因为快照里没有就把置信度丢了
+        val succeeded = snapshot(
+            """
+            {"task_id": "task_s", "user_id": "local", "status": "succeeded", "source": "api",
+             "mode": "async", "progress": 1.0,
+             "created_at": "2026-10-06T14:00:00Z", "updated_at": "2026-10-06T14:01:00Z",
+             "artifacts": {"write": {"entry_id": "task_s:write", "amount": 38.5,
+                                     "currency": "CNY", "direction": "expense"}}}
+            """,
+        )
+        val fromStream = ReceiptFields(
+            amount = json.parseToJsonElement("38.5"),
+            currency = "CNY",
+            confidence = 0.91,
+        )
+
+        val done = CaptureOutcome.fromSnapshot("task_s", succeeded, fromStream)
+            as CaptureOutcome.Completed
+        assertEquals(0.91f, done.confidence)
+        // 金额也来自流里那份，而不是快照里那条没有分类的
+        assertTrue(ConfidenceGate.canAutoPost(done.confidence, 0.85f))
     }
 
     // ---------- 事件载荷 ----------
