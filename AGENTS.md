@@ -1081,3 +1081,64 @@ Kotlin 的穷尽 `when` 因此在 `toSummary()` 里编译不过，我补了
 **5. 给流水导入界面的一个小提醒**：`StatementRow.direction` 现在可能是
 `NEUTRAL`，但它只会出现在 `plan.excluded` 里，不会出现在 `entries`/`duplicates`。
 所以 `ImportPlan.entries` 里的方向仍只有收/支两种。
+
+### 2026-10-06 · 数据层这边（P0-a 置信度通路已就位 + **一条要更正的事实**）
+
+**⚠️ 先更正一条事实：`field_confidence` 服务端并不产出。**
+
+PM 的任务描述里写「extract 产物已带 `confidence: 0.95` 和
+`field_confidence: {amount: 0.95, ...}`」。**整体 `confidence` 确实有**
+（实测收据任务给 0.98），但**字段级那个不存在**：
+
+- `smart-dispatcher/schemas/bookkeeping_receipt_fields.json` 里没有这个属性
+- `grep -rn field_confidence` 在整个 dispatcher 仓库**一处都没有**
+- 实测 task 的 `artifacts.extract` 只有 `confidence: 0.98`，没有 `field_confidence`
+
+我按契约把它做成了可空透出口子（`ReceiptFields.fieldConfidence` /
+`Completed.fieldConfidence`），**来了就能直接用**，但现在恒为 null。
+**所以界面别把它当作可用的信号**——真实的判断依据只有整体 `confidence`。
+
+**给界面的契约（照 PM 定死的写，现已实现）：**
+
+```kotlin
+CaptureOutcome.Completed 携带:
+  confidence: Float?                      // 整体置信度, null = 拿不到
+  fieldConfidence: Map<String, Float>?    // 字段级；服务端当前不产出，恒 null
+```
+
+**判定不要自己写，走数据层：**
+
+```kotlin
+import dev.dzsun.bookkeeping.core.ledger.ConfidenceGate
+
+ConfidenceGate.canAutoPost(confidence, threshold)      // 能不能直接入账
+ConfidenceGate.requiresConfirmation(confidence, threshold)  // 要不要问用户
+ConfidenceGate.DEFAULT_THRESHOLD  // 0.85（兜底值）
+ConfidenceGate.MIN_THRESHOLD / MAX_THRESHOLD
+ConfidenceGate.clamp(value)
+```
+
+三条口径，都是刻意的：
+
+1. **`confidence == null` 一律要确认。** 它不是"未知但大概没事"，而是"真不知道"。
+   三种真实来路：老服务端不给、走 `single_tool_action` 的纯文本路由产物里没这个字段、
+   事件流断了只回看到 `LedgerEntry`。任何一条被当成可信，都会**静默**跳过用户确认。
+2. **取等号算达标**（`confidence >= threshold`）。写 `>` 的话用户设 0.85 实际生效的是 0.86。
+3. **阈值真源在 `assets/entry_rules.json`**，`EntryRuleCatalog` 读它，读不到兜底 0.85。
+   用户在设置里调过的值存 prefs——**出厂默认值与可调范围都出自数据层那一份配置**，
+   界面只读。
+
+**你们已经接上了**：我看到 `AutoConfirm.kt` 的 `PrefsAutoConfirmSettings` 已经注入
+`EntryRuleCatalog` 并走 `ConfidenceGate.clamp`，`AddEntryViewModel` / `SettingsViewModel`
+也都换成了 `ConfidenceGate.*`。这样两块就没分叉了，很好。
+
+**我删了 `ReceiptFields.isHighConfidence` 和它的 `CONFIDENCE_THRESHOLD = 0.8`。**
+那个 0.8 和真阈值 0.85 并排放着，迟早有人抓错；它当时也只剩自己的测试在引用。
+要判"高不高"请一律走 `ConfidenceGate`。
+
+**一条还没做的（下一轮数据层）**：`AutoEntryUndo` 需要的
+`suspend fun void(journalId: String): Boolean` 我**这次没做**——
+它不在 PM 给这一轮列的 5 项里，而且作废要跟 `JournalStatus.VOID` 的语义对齐
+（是作废留痕还是删除、分录怎么办），值得单独一轮做对，不该塞进这次。
+你们的 `UnavailableAutoEntryUndo` 占位是对的：**没有能力就不渲染按钮**，
+显示一个点不动的撤销键比不显示更糟。这条我已记进 `docs/status-data-layer.md` 的下一步。

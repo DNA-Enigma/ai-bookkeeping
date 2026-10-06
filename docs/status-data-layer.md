@@ -20,7 +20,7 @@
 | `tools/` | `build.sh` / `setup-toolchain.sh` / `run-emulator.sh` / `serve-apk.sh` | — |
 
 **构建**：`tools/build.sh :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**，
-**125 个测试 0 失败 2 跳过**（跳过的是两个联调用例，见第三节和第六节）。
+**147 个测试 0 失败 4 跳过**（跳过的是 4 个联调用例，见第三节和第六节）。
 
 ---
 
@@ -186,10 +186,45 @@ STATEMENT_REAL_WECHAT="/path/微信支付账单.xlsx" \
 
 ---
 
-## 七、下一步
+## 七、P0-a 置信度阈值（数据层部分已完成）
 
-- P0-a 低置信才弹确认：需要数据层把分字段置信度暴露出去（`extract` 已带 `confidence`）。
-- P0-b：dispatcher 修完 P0-1c 后把 `authoritative` 切回 `true`，
-  并把联调用例里的 P0-1c 重试去掉。
-- P1-d 退款冲减：`statusChanged` 现在只能看不能办（界面同事已提），
-  数据层需要给出能落库的形状（负向金额或冲减标记）。
+产品决定：高置信直接入账（事后可撤销），低置信才弹确认卡。
+数据层的分工是「值从哪来 / 阈值是多少 / 谁说了算」，界面只读结论。
+
+| 件 | 在哪 |
+|---|---|
+| 整体置信度 | `CaptureOutcome.Completed.confidence: Float?` |
+| 字段级置信度 | `Completed.fieldConfidence` / `ReceiptFields.fieldConfidence`；**服务端当前不产出，恒 null** |
+| 判定 | `core/ledger/ConfidenceGate`（纯函数，无 Android 依赖） |
+| 阈值真源 | `assets/entry_rules.json`，由 `EntryRuleCatalog` 读，读不到兜底 0.85 |
+
+三条口径：
+
+1. **`confidence == null` 一律要确认。** 三种真实来路：老服务端不给、
+   纯文本走 `single_tool_action`（产物无此字段）、事件流断了只回看到 `LedgerEntry`。
+   把 null 当成可信，就会在这几条路上**静默**跳过用户确认。
+2. **取等号算达标**（`>=`）。写 `>` 会让用户设 0.85 时实际生效 0.86。
+3. **阈值出厂默认与可调范围出自同一份配置**，避免「默认值落在自己声明的范围之外」。
+
+顺带删掉了 `ReceiptFields.isHighConfidence` 与它的 `CONFIDENCE_THRESHOLD = 0.8`——
+那是个和真阈值 0.85 并排躺着的第二个数，迟早有人抓错。
+
+**`field_confidence` 是一次事实更正**：PM 的任务描述说它已存在，实测不存在
+（schema 里没有、dispatcher 全仓 grep 为空）。按契约留了口子，但界面**别把它
+当作可用信号**。
+
+---
+
+## 八、下一步
+
+- **`LedgerRepository.void(journalId)`**（界面提的、P0-a 的缺口）：
+  高置信自动入账要配「事后可撤销」，而现在 `LedgerRepository` 只有 `post`。
+  该跟 `JournalStatus.VOID` 对齐（作废留痕而非删除，分录跟着一并作废），
+  而不是直接删行——删行会绕过凭证与分录的事务，留下孤儿分录。
+  界面的 `UnavailableAutoEntryUndo` 占位是对的（没能力就不渲染按钮）。
+- P0-b 已完成：`authoritative` 已切回 `true` 并经真实调度层验证（纯文本 4/4 succeeded，
+  收据走完 extract→normalize→dedupe→write）。
+- P1-d 退款冲减：`statusChanged` 现在只能看不能办，需要能落库的形状
+  （负向金额或冲减标记）。
+- 阈值 0.85 仍是起步值，**没有照真实使用校准过**——攒够「用户改了多少笔自动入账的账」
+  之后再调 `entry_rules.json`。
