@@ -173,6 +173,7 @@ data class TaskSnapshot(
 
     companion object {
         const val STATUS_AWAITING_CLARIFICATION = "awaiting_clarification"
+        const val STATUS_SUCCEEDED = "succeeded"
 
         /** 终态不可变：重跑产生新任务，不改写原任务。 */
         val TERMINAL_STATUSES = setOf(

@@ -3,17 +3,16 @@ package dev.dzsun.bookkeeping.core.network
 import dev.dzsun.bookkeeping.core.money.Money
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * `bookkeeping.ReceiptFields`。
+ * `bookkeeping.ReceiptFields` —— `extract_receipt_fields` 节点的产出。
  *
- * 契约里这四个 schema **从未定义**，这个形状是拿真实任务实测出来的
- * （跑 `receipt_to_entry`，读 `extract` 节点的 `subtask.completed.output`）。
- * 后端补上定义后，以契约为准核对一次。
+ * 形状与 `schemas/bookkeeping_receipt_fields.json` 对齐（该 schema 已冻结）。
  *
  * [amount] 刻意是 [JsonElement] 而不是 `Double`：金额一旦经过浮点就再也回不到精确值。
  * 用 [money] 取值，它走 JSON 字面量直接转 [BigDecimal]。
@@ -26,6 +25,8 @@ data class ReceiptFields(
     val datetime: String? = null,
     @SerialName("payment_method") val paymentMethod: String? = null,
     val direction: String? = null,
+    /** 归类，取值来自用户自己的分类词表（不是代码里的常量）。 */
+    val category: String? = null,
     val confidence: Double? = null,
     val notes: String? = null,
 ) {
@@ -46,34 +47,50 @@ data class ReceiptFields(
 }
 
 /**
- * `bookkeeping.LedgerEntry` —— 真正写进账本的那条记录。
+ * `bookkeeping.LedgerEntry` —— 调度层给出的**待入账凭证草稿**，不是已写入的账目。
  *
- * 同样是实测形状（`single_tool_action` 路由跑通后的 `artifacts.main.entry`）：
- * `{amount: 38.0, currency: "CNY", merchant: null, category: "lunch",
- *   direction: "expense", id: "e_1", _token: "task_…:main"}`
+ * 形状与 `schemas/bookkeeping_ledger_entry.json`（已冻结）及实跑一致：
+ * `{entry_id: "task_…:main", amount: 38.0, currency: "CNY", direction: "expense",
+ *   category: "餐饮", merchant: null, occurred_at: null, source_task: "task_…", note: null}`
  *
- * `_token` 是调度层按 `(task_id, subtask_id)` 派生的稳定幂等 token，
- * 与契约承诺的一致。
+ * 契约的口径值得记住：后端 handler 跑在服务端，而账本在本地 Room——
+ * 它**不可能**写进用户手机。所以是「单式过网、复式留在消费端」：
+ * 服务端只给方向与分类名，借贷映射在本机由 `JournalDraft` 完成。
+ *
+ * [entryId] 由 `(task_id, subtask_id)` 派生，稳定——重试时拿它做幂等键就不会重复入账。
  */
 @Serializable
 data class LedgerEntry(
+    @SerialName("entry_id") val entryId: String? = null,
     val amount: JsonElement? = null,
     val currency: String? = null,
     val merchant: String? = null,
     val category: String? = null,
     val direction: String? = null,
-    val id: String? = null,
-    @SerialName("_token") val token: String? = null,
+    @SerialName("occurred_at") val occurredAt: String? = null,
+    @SerialName("source_task") val sourceTask: String? = null,
+    val note: String? = null,
 ) {
     /** 折算成确认卡片要的那种字段视图。没提到的字段留空，不编造。 */
     fun toReceiptFields(): ReceiptFields = ReceiptFields(
         amount = amount,
         currency = currency,
         merchant = merchant,
+        datetime = occurredAt,
         direction = direction,
+        category = category,
+        // 服务端没有给整体置信度，这里不编一个——留给界面按「无置信度」处理
         confidence = null,
-        notes = category?.let { "服务端归类：$it" },
+        notes = note,
     )
+
+    companion object {
+        /**
+         * 「这个 JSON 对象是不是一条 LedgerEntry」的判别键。
+         * schema 里 `entry_id` 是必填，其余字段都可空，所以只有它能做判别。
+         */
+        const val KEY_ENTRY_ID = "entry_id"
+    }
 }
 
 /** `bookkeeping.DedupeResult`，同样是实测形状。 */
@@ -141,3 +158,41 @@ internal fun JsonObject?.subtaskOutput(subtaskId: String): JsonObject? {
     if (node["subtask_id"]?.jsonPrimitive?.content != subtaskId) return null
     return node["output"]?.jsonObject
 }
+
+/** 契约回包的解码器。事件与产物都是开放对象，多出来的键一律忽略。 */
+internal val CaptureJson = Json { ignoreUnknownKeys = true }
+
+/** 先自己、再逐层往里，产出所有嵌套 JSON 对象。 */
+internal fun JsonObject.nestedObjects(): Sequence<JsonObject> = sequence {
+    yield(this@nestedObjects)
+    for ((_, value) in this@nestedObjects) {
+        val child = value as? JsonObject ?: continue
+        yieldAll(child.nestedObjects())
+    }
+}
+
+/**
+ * 终态快照的 `artifacts` 里，调度层给的那条待入账凭证。
+ *
+ * **形状随路由而变**，实测两种（都是节点产物直接就是一条凭证，没有 `entry` 再包一层）：
+ * - 票据流程按节点分：`{extract:{…}, normalize:{…}, deduce:{…}, write:{entry_id:…}}`
+ * - 单步工具只有：`{main:{entry_id:…}}`
+ *
+ * 所以按判别键 `entry_id` 递归找，而不是假定某个固定键——写死取 `artifacts["extract"]`
+ * 或找 `entry` 包装键，两种形状都会误判成「成功但没产物」。
+ */
+internal fun JsonObject?.ledgerEntry(): LedgerEntry? =
+    this?.nestedObjects()
+        ?.filter { it.containsKey(LedgerEntry.KEY_ENTRY_ID) }
+        ?.firstNotNullOfOrNull { decodeOrNull(LedgerEntry.serializer(), it) }
+
+/** 退路：有些路由把字段直接摊在节点产物上，没有 `entry_id` 可判别。 */
+internal fun JsonObject?.receiptFields(): ReceiptFields? =
+    this?.nestedObjects()
+        ?.filter { it.containsKey("amount") && it.containsKey("currency") }
+        ?.firstNotNullOfOrNull { decodeOrNull(ReceiptFields.serializer(), it) }
+
+private fun <T> decodeOrNull(
+    serializer: kotlinx.serialization.DeserializationStrategy<T>,
+    element: JsonObject,
+): T? = runCatching { CaptureJson.decodeFromJsonElement(serializer, element) }.getOrNull()
