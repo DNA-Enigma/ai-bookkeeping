@@ -90,6 +90,36 @@
 尚未验证的：`core/network` 只通过了编译，**没有对着真实调度层跑过**。
 本地 `smart-dispatcher` 联调属于 M2。
 
+### 已对着真实调度层跑通（2026-10-06）
+
+本地起了 `smart-dispatcher`（`127.0.0.1:8010`，避开被占用的 8000），
+用 `core/network` 的能力实测了一遍：
+
+| 能力 | 结果 |
+|---|---|
+| `POST /v1/media` | ✓ 响应形状与 `MediaUpload` 一致（`media_id`/`sha256`/…） |
+| `Problem` 错误体 | ✓ 一致。实测 HEIC 返回 415 `unsupported_media` |
+| `POST /v1/tasks` | ✓ 与 `TaskAccepted` 一致。注意 **`events_url` 是相对路径**，客户端要自己拼 baseUrl |
+| SSE 帧格式 | ✓ `event:` / `id:` / `data:` + 空行，与解析器一致 |
+| `Last-Event-ID` 重放 | ✓ 实测带 `5` 重连，从 seq 6 开始回放 |
+| `GET /v1/tasks/{id}` | ✓ 与 `TaskSnapshot` 一致（多出 `profile`/`decision`，已容错） |
+
+`heartbeat` 事件复用上一个事件的 `id`（不会推进重放游标），这是对的，别当 bug。
+
+### 实测发现的调度层 bug（可复现，需要后端修）
+
+**纯文本记账会被套用需要图片的流程模板，然后必然失败。**
+
+复现：提交 `{"input":{"text":"午饭花了38"}, "declared":{"intent":"bookkeeping.capture_from_text"}}`
+（无媒体），服务端路由到 `multi_step_analysis`、拆解器选中 `receipt_to_entry` 模板，
+第一个节点绑定 `media_ref: {$ref: "envelope.input.media[0].media_id"}` →
+`bad_input_reference` / 下标 0 越界 → 整链失败。
+
+而 `receipt_to_entry` 自己的 `applies_when` 写明「输入中含有一张主要作为凭证的图像……
+不适用则不用」。**模板的命中判定没有考虑输入模态**，或拆解器没拿到模态信息。
+
+影响：`bookkeeping.capture_from_text` 这条意图（税表里的正式类型）目前**完全不可用**。
+
 ### 需要对齐后端（`smart-dispatcher`）的契约缺口
 1. **`bookkeeping.ReceiptFields` / `Merchant` / `DedupeResult` / `LedgerEntry` 被引用但从未定义**——
    `schemas/` 下没有对应文件。**这是最硬的缺口**：界面要渲染结果、本地表要落库，都得知道形状。
@@ -268,4 +298,63 @@ jpeg / png / webp，**转完必须是 JPEG**，别转成 HEIC 的变体。openap
 
 提交身份还没设，我用了一次性覆盖（`git -c user.name=...`）没动全局配置。
 你自己设一下会方便些，否则每次提交都得带参数。
+
+### 2026-10-06 · 界面这边（0.2.0 开工对齐）
+
+`0.1.1` 已按你的要求提交（`b67df1d`，含 `feature/**`/`navigation/**`/`designsystem/**`）。
+共用文件我改的只有 `app/build.gradle.kts`（版本号 0.1.1）和 `Contract.kt` 那一行注释，
+都进了这次提交，`git diff ba45c38..b67df1d` 可核对。
+
+**0.2.0 澄清渲染器绑定点，按你 `Contract.kt` 的类型原样绑，不另造模型：**
+
+| 界面侧 | 契约类型 | 用法 |
+|---|---|---|
+| 渲染 | `PendingClarification` | `question` 当标题，`options[]` 渲染成选项按钮（`id`/`label`），`blocking` 决定能否跳过 |
+| 答复 | `ClarificationAnswer` | 选项点击 + 字段改动一起提交：`questionId` + `optionId` + `edits[]` |
+| 改动 | `FieldEdit(field, from, to)` | 用户改卡片字段时实时记；`from` 是解析原值，`to` 是用户改后的 |
+| 收尾 | `TaskFeedback(verdict, edits, reason)` | 入账时回报：`edits` 非空 → `edited`，否则 `confirmed`，放弃 → `rejected` |
+
+**`edits[].field` 的取值我打算用这些字符串**（和 `DraftCard` 字段一一对应），
+你们那边流程模板的 `confirmation` 段如果已经定了别的词表，告诉我，我改这边：
+
+```
+kind | amount | category | payee | note | date
+```
+
+**离线降级路径**（`DispatcherClient` 未接入时）：
+`LocalAiParser` 解析出低置信度卡片时，本地合成一条 `PendingClarification`
+（比如「这笔是收入还是支出？」），照样走同一个渲染器。
+这样确认页在有无调度层时是同一套 UI，接上后只换数据来源。
+
+**接口边界**：渲染器只吃 `PendingClarification`、吐 `ClarificationAnswer`，
+不直接 import `DispatcherClient`。中间留一个 `ClarificationPort`，
+接调度层时在 `AppModule` 里换绑定就行——和 `AiParser` 同一个套路。
+
+有异议回帖，没异议我就按这个写了。
+
+### 2026-10-06 · 界面这边（0.2.0 澄清渲染器已落地）
+
+按上面的绑定点写完了，**25 个单元测试 0 失败**（新增 `ClarificationTest` 4 个），
+`0.2.0`（versionCode 3）已提交。
+
+界面侧新增：
+- `feature/entry/Clarification.kt` — `ClarificationPort` 接口 + `NoOpClarificationPort` 离线占位
+  + `collectFieldEdits()`（基线对比产出 `edits[]`）+ `localClarification()`（低置信度合成澄清）
+- `feature/entry/ClarificationCard.kt` — **纯数据驱动**渲染 `PendingClarification`
+  （`question`/`options[]`/`blocking` 全来自数据，无写死表单）
+- `feature/entry/ClarificationModule.kt` — 界面侧自己的 Hilt 绑定，**没动你们的 `AppModule`**
+- `AddEntryViewModel` — 解析时留基线；改字段实时算 `edits[]`；
+  `onClarificationAnswer()` 回 `ClarificationAnswer`；入账时回 `TaskFeedback`
+  （有改动 `edited`，无改动 `confirmed`）
+
+两点请你确认（有异议我改，不阻塞）：
+1. `edits[].field` 我用的是 `kind|amount|category|payee|note|date`（见上条）。
+2. `TaskFeedback.verdict` 我按契约注释写的 `confirmed`/`edited`；
+   放弃走的是 `rejected`，但目前 UI 没有「放弃」按钮——你们流程模板需要的话我加。
+
+接调度层时只换 `ClarificationModule` 里的绑定：
+```kotlin
+fun provideClarificationPort(): ClarificationPort = DispatcherClarificationPort(dispatcherClient)
+```
+渲染器和 `edits[]` 收集逻辑不用动。
 

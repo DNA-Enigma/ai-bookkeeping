@@ -9,6 +9,10 @@ import dev.dzsun.bookkeeping.core.database.JournalSource
 import dev.dzsun.bookkeeping.core.ledger.JournalDraft
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import dev.dzsun.bookkeeping.core.money.Money
+import dev.dzsun.bookkeeping.core.network.ClarificationAnswer
+import dev.dzsun.bookkeeping.core.network.FieldEdit
+import dev.dzsun.bookkeeping.core.network.PendingClarification
+import dev.dzsun.bookkeeping.core.network.TaskFeedback
 import dev.dzsun.bookkeeping.core.platform.Clock
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +53,10 @@ data class AddEntryUiState(
     val cards: List<DraftCard> = emptyList(),
     val parseError: String? = null,
     val allSaved: Boolean = false,
+    /** 服务端或本地合成的澄清；非空时确认页优先渲染它。 */
+    val pendingClarification: PendingClarification? = null,
+    /** 用户相对解析基线的改动，入账时按 `edits[]` 回报。 */
+    val fieldEdits: List<FieldEdit> = emptyList(),
     // —— 手动模式 ——
     val kind: EntryKind = EntryKind.EXPENSE,
     val amountText: String = "",
@@ -79,7 +87,7 @@ data class AddEntryUiState(
         }
 
     val canConfirmCards: Boolean
-        get() = cards.isNotEmpty() && cards.all { it.canSave } && !isSaving
+        get() = cards.isNotEmpty() && cards.all { it.canSave } && !isSaving && pendingClarification == null
 }
 
 @HiltViewModel
@@ -87,10 +95,14 @@ class AddEntryViewModel @Inject constructor(
     private val repository: LedgerRepository,
     private val clock: Clock,
     private val parser: AiParser,
+    private val clarificationPort: ClarificationPort,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AddEntryUiState(dateEpochDay = clock.today().toEpochDay()))
     val state: StateFlow<AddEntryUiState> = _state.asStateFlow()
+
+    /** 解析落卡时的原值，用户改动按它算 `edits[].from`。 */
+    private val baselines = mutableMapOf<String, DraftCard>()
 
     init {
         viewModelScope.launch {
@@ -164,7 +176,16 @@ class AddEntryViewModel @Inject constructor(
                     confidence = p.confidence,
                 )
             }
-            _state.update { it.copy(isParsing = false, cards = cards) }
+            baselines.clear()
+            cards.forEach { baselines[it.id] = it }
+            _state.update {
+                it.copy(
+                    isParsing = false,
+                    cards = cards,
+                    fieldEdits = emptyList(),
+                    pendingClarification = localClarification(cards),
+                )
+            }
         }
     }
 
@@ -188,10 +209,48 @@ class AddEntryViewModel @Inject constructor(
 
     fun onCardDateChange(id: String, epochDay: Long) = updateCard(id) { it.copy(dateEpochDay = epochDay) }
 
-    fun onCardRemove(id: String) = _state.update { s -> s.copy(cards = s.cards.filterNot { it.id == id }) }
+    fun onCardRemove(id: String) = _state.update { s ->
+        baselines.remove(id)
+        s.copy(
+            cards = s.cards.filterNot { it.id == id },
+            pendingClarification = localClarification(s.cards.filterNot { it.id == id }),
+        )
+    }
 
-    private fun updateCard(id: String, transform: (DraftCard) -> DraftCard) = _state.update { s ->
-        s.copy(cards = s.cards.map { if (it.id == id) transform(it) else it })
+    private fun updateCard(id: String, transform: (DraftCard) -> DraftCard) {
+        _state.update { s ->
+            val cards = s.cards.map { if (it.id == id) transform(it) else it }
+            s.copy(cards = cards, fieldEdits = recomputeEdits(cards))
+        }
+    }
+
+    private fun recomputeEdits(cards: List<DraftCard>): List<FieldEdit> = cards.flatMap { card ->
+        val baseline = baselines[card.id] ?: return@flatMap emptyList()
+        collectFieldEdits(baseline, card)
+    }
+
+    /** 用户选定澄清选项后落地：本地合成的选项直接改卡片，服务端的回 `ClarificationAnswer`。 */
+    fun onClarificationAnswer(optionId: String) {
+        val clarification = _state.value.pendingClarification ?: return
+        val answer = ClarificationAnswer(
+            questionId = clarification.questionId,
+            optionId = optionId,
+            edits = _state.value.fieldEdits,
+        )
+        // 本地合成的 kind 澄清：选项直接决定方向
+        kindFromOptionId(optionId)?.let { kind ->
+            val id = clarification.questionId.removePrefix("local-")
+            _state.update { s ->
+                val cards = s.cards.map {
+                    if (it.id == id) it.copy(kind = kind, error = null) else it
+                }
+                s.copy(cards = cards, fieldEdits = recomputeEdits(cards))
+            }
+        }
+        _state.update { it.copy(pendingClarification = null) }
+        viewModelScope.launch {
+            runCatching { clarificationPort.answer(answer) }
+        }
     }
 
     fun confirmCards() {
@@ -241,8 +300,26 @@ class AddEntryViewModel @Inject constructor(
             }
             result.fold(
                 onSuccess = {
+                    // 修正反馈：有改动就是 edited，没动是 confirmed——那是自进化最值钱的标注
+                    val edits = current.fieldEdits
+                    runCatching {
+                        clarificationPort.feedback(
+                            TaskFeedback(
+                                verdict = if (edits.isEmpty()) "confirmed" else "edited",
+                                edits = edits,
+                            ),
+                        )
+                    }
+                    baselines.clear()
                     _state.update {
-                        it.copy(isSaving = false, allSaved = true, cards = emptyList(), rawText = "")
+                        it.copy(
+                            isSaving = false,
+                            allSaved = true,
+                            cards = emptyList(),
+                            rawText = "",
+                            fieldEdits = emptyList(),
+                            pendingClarification = null,
+                        )
                     }
                 },
                 onFailure = { error ->

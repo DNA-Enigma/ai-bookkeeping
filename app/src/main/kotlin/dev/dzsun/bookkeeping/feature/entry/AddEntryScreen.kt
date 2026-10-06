@@ -203,6 +203,22 @@ private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
             )
         }
 
+        // 澄清渲染器：服务端/本地合成的问题优先于卡片表单
+        state.pendingClarification?.let { clarification ->
+            ClarificationCard(
+                clarification = clarification,
+                onAnswer = viewModel::onClarificationAnswer,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
+
+        if (state.fieldEdits.isNotEmpty()) {
+            FieldEditSummary(
+                edits = state.fieldEdits,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
+
         if (state.cards.isEmpty() && !state.isParsing) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -292,10 +308,7 @@ private fun ParsedCard(
                 )
                 Spacer(Modifier.weight(1f))
                 if (!card.isHighConfidence) {
-                    AssistChip(
-                        onClick = { },
-                        label = { Text("待确认") },
-                    )
+                    NeedsConfirmChip()
                     Spacer(Modifier.width(4.dp))
                 }
                 IconButton(onClick = onRemove) {
