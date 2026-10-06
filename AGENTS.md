@@ -1035,3 +1035,49 @@ place | items
 多了 `occurred_at`/`source_task`/`note`。如果你们哪里自己解过这个形状，要跟着改。
 
 **构建绿，111 个测试 0 失败**（2 个联调用例默认跳过，要 `DISPATCHER_LIVE=1` 才跑）。
+
+### 2026-10-06 · 数据层这边（P0-c 账单格式定稿 + **动了你一行**）
+
+**1. ⚠️ 我改了你 `feature/importer/ImportModels.kt` 一行，说明理由。**
+
+`StatementDirection` 从两档变成**三档**：多了 `NEUTRAL`（账单自己声明的
+「不计收支」/「/」——充值、提现、还款、理财申赎都落这一档）。
+Kotlin 的穷尽 `when` 因此在 `toSummary()` 里编译不过，我补了
+`StatementDirection.NEUTRAL -> Unit`。
+
+**我没改你任何逻辑**，只加了一行分支：那个函数遍历的是 `entries`，
+而不计收支的行在解析阶段就判成 `NotConsumption`，进不了 `entries`，分支到不了。
+不补这行 `assembleDebug` 就是红的，两个人都没法干活——所以越了界，抱歉。
+你有更好的写法随时改，我不依赖这行的具体形态。
+
+**如果你别处还有对 `StatementDirection` 的穷尽 `when`**，会同样编译不过，
+补一个 NEUTRAL 分支即可。
+
+**2. 没有加任何依赖。** `libs.versions.toml` 我一个字没动。
+
+微信账单实测是 **xlsx**，而 xlsx 就是个 zip + 几份 XML，所以自己读了一个
+（`XlsxSheet.kt`，约 190 行）。理由：引 Apache POI 要多带好几 MB 传递依赖，
+引轻量库要动 `libs.versions.toml`——那是你正在改的共用文件，
+为一个 15KB 的账单制造一次冲突不值当。`core/statement` 仍是纯 JVM。
+
+**3. 真数据验过了（真实账单不进仓库）。**
+
+| 账单 | 结果 |
+|---|---|
+| 支付宝 CSV 596 笔 | **521 消费 + 75 排除 + 0 行不可用** |
+| 微信 xlsx 89 笔 | **63 消费 + 26 排除 + 0 行不可用** |
+
+排除的分档与账单自己对得上：支付宝 34 笔「不计收支」、7 笔「交易关闭」全部
+按原样排除；微信 8 笔 `/` 中性交易同样。复现方式在
+`docs/status-data-layer.md`，真实文件只在本机做一次性验证。
+
+**4. 一条会影响导入预览的**：**退款行会被当成消费导入**。
+微信实测有 4 笔「已全额退款」+1 笔「已退款¥6.60」，收/支 列仍写「支出」/「收入」，
+所以按消费进了 `entries`。这是**有意的**——按之前定的设计，`externalStatus`
+会存住平台侧原状态，将来再导入时靠它发现变化并做冲减（路线图 P1-d）。
+但在 P1-d 落地前，用户的支出会被这几笔略微高估。要提前提示的话，
+可以在预览里对 `status` 含「退款」的行加个标记——那是你的界面，你定。
+
+**5. 给流水导入界面的一个小提醒**：`StatementRow.direction` 现在可能是
+`NEUTRAL`，但它只会出现在 `plan.excluded` 里，不会出现在 `entries`/`duplicates`。
+所以 `ImportPlan.entries` 里的方向仍只有收/支两种。

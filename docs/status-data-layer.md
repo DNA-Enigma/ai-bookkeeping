@@ -15,12 +15,12 @@
 | `core/ledger` | `JournalDraft`（构造即校验复式平衡）+ `LedgerRepository` + 科目表装载 | `JournalDraftTest` 15 |
 | `core/database` | Room 三表 `account`/`journal`/`posting` + `journal_item`，DAO 与投影查询 | 编译期校验 |
 | `core/network` | 调度层契约 DTO、`DispatcherClient`（六端点 + SSE 重放）、`CaptureClient` | `CaptureModelsTest` 14、`CaptureClientLiveTest` 2 |
-| `core/statement` | 流水导入：ZipCrypto 解密、CSV 解析、入库管道 | `CsvStatementParserTest`、`StatementArchiveTest`、`StatementImporterMappingTest` |
+| `core/statement` | 流水导入：ZipCrypto 解密、CSV 与 xlsx 解析、入库管道 | `CsvStatementParserTest` 15、`StatementArchiveTest` 8、`StatementImporterMappingTest` 9、`StatementRealFormatTest` 12、`StatementRealFileTest` 2（默认跳过） |
 | `core/update` | 在线更新：版本检查、下载校验、交系统安装器 | `UpdateModelsTest` |
 | `tools/` | `build.sh` / `setup-toolchain.sh` / `run-emulator.sh` / `serve-apk.sh` | — |
 
 **构建**：`tools/build.sh :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**，
-**111 个测试 0 失败 2 跳过**（跳过的是两个联调用例，见第三节）。
+**125 个测试 0 失败 2 跳过**（跳过的是两个联调用例，见第三节和第六节）。
 
 ---
 
@@ -116,10 +116,80 @@ curl -s -N "http://127.0.0.1:8010/v1/tasks/<task_id>/events" -w "[bytes=%{size_d
 
 ---
 
-## 六、下一步
+## 六、P0-c 真实账单格式定稿（已完成）
 
-- **P0-c 真实账单格式定稿**（进行中）：支付宝 CSV 的 GBK / 23 行回单头 / 尾逗号 /
-  「不计收支」第三档；微信 xlsx 输入格式。见 `docs/statement-formats-real.md`。
+按 `docs/statement-formats-real.md` 改动，并用**真实导出账单**在本机验过。
+
+### 验证结果（真实文件只在本机跑，不进仓库）
+
+```bash
+STATEMENT_REAL_ALIPAY="/path/支付宝交易明细.csv" \
+STATEMENT_REAL_WECHAT="/path/微信支付账单.xlsx" \
+  tools/build.sh :app:testDebugUnitTest --tests "*StatementRealFileTest*" --rerun-tasks
+```
+
+| 账单 | 消费 | 排除 | 不可用 |
+|---|---|---|---|
+| 支付宝 CSV（596 笔） | 521 | 75 | **0** |
+| 微信 xlsx（89 笔） | 63 | 26 | **0** |
+
+排除项与账单自己的声明逐条对得上：
+支付宝「不计收支」34 笔、支出侧「交易关闭」7 笔；微信收/支为 `/` 的 8 笔。
+
+### 四个坑的实际结论
+
+| 坑 | 结论 |
+|---|---|
+| GBK 编码 | 改对了。解码顺序里 **GB18030 替掉 GBK**——前者是后者的严格超集，并列只会让后者永远轮不到（死配置） |
+| 23 行回单头 | **原来就没事**。表头判据是「能对上三列以上」，不写死行号 |
+| 尾逗号 | **原来就没事**。表头与数据行都多一个空字段，列数仍然一致 |
+| 单号带 `\t` | **原来就没事**。切格后统一 `trim()` |
+
+**真正致命的是第 5 个（文档里没列为坑）**：`ref` 列的别名。
+支付宝的单号列叫「**交易订单号**」，配置里写的是「交易号」，而列名匹配是
+**精确相等**——认不出来就会因为「缺少必需列 ref」让整份账单解析失败。
+
+### 改了什么
+
+1. **`StatementDirection` 多一档 `NEUTRAL`**。原先把「不计收支」当成
+   「收支方向无法识别」报 `Unusable`，用户看到会以为文件坏了——其实它文件没坏，
+   只是这行不该入账。现在落 `NotConsumption` 并说明是资金转移。
+   **微信那一档实测写的是 `/`**，不是文档推测的「中性交易」；两个都收。
+2. **交易状态「交易关闭」不导入**（新增配置项 `skip_statuses`）。
+   **但没有写成「非成功即排除」**：微信的「已全额退款」是成交后退的，钱动过，
+   将来要靠它发现状态变化并冲减。
+3. **微信 xlsx 输入**。xlsx 就是 zip + 几份 XML，自己读的（共享字符串、单元格、
+   `styles.xml`），**没有引入任何依赖**。日期必须读样式才知道：
+   Excel 里日期就是个数字（`46301.83` = 2026-10-06），靠 `s="1"` → `numFmtId=164`
+   认出来；不读样式整列时间全废。金额列 `¥#,##0.00` 则不能被误判成日期。
+4. **重构**：找表头 / 认格式 / 判收支 / 排除非消费 抽到 `StatementRowParser`，
+   CSV 与 xlsx 共用。两边各写一份的话，改了 CSV 忘了改 xlsx，同一份账单换个格式
+   导入结果就会不同，而这种不一致极难发现。
+
+### 测试
+
+- `StatementRealFormatTest` 12 例，**全合成脱敏**：四个坑各一条断言，
+  支付宝三档收支、微信 `/`、日期序列号、金额不被误判成日期。
+  xlsx 夹具在代码里现造（二进制进仓库既不能逐字审阅，也说不清 `numFmtId` 是什么）。
+- `StatementRealFileTest` 2 例，**默认跳过**，只从环境变量取路径——
+  真实账单含姓名/手机号/完整交易记录，路径与内容都不进仓库。
+
+### 已知边界（记在这里，别当 bug）
+
+- **退款行会被当成消费导入**。微信实测 4 笔「已全额退款」+1 笔「已退款¥6.60」，
+  收/支 列仍写「支出」/「收入」。这是**有意的**：`externalStatus` 存住平台侧原状态，
+  将来再导入时靠它发现变化并冲减（P1-d）。落地前支出会略微高估。
+- **列数少于表头的行会被当成统计行跳过**，只报条数不报内容。真实账单里
+  数据行不会少列（空的也占位），所以概率低；但真发生时会表现为
+  「跳过了 N 行说明/统计行」而不是报错。
+- xlsx 只读**第一个工作表**，且不处理公式求值（只取缓存结果）。
+
+---
+
+## 七、下一步
+
 - P0-a 低置信才弹确认：需要数据层把分字段置信度暴露出去（`extract` 已带 `confidence`）。
 - P0-b：dispatcher 修完 P0-1c 后把 `authoritative` 切回 `true`，
   并把联调用例里的 P0-1c 重试去掉。
+- P1-d 退款冲减：`statusChanged` 现在只能看不能办（界面同事已提），
+  数据层需要给出能落库的形状（负向金额或冲减标记）。
