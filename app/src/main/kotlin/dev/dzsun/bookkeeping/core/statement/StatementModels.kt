@@ -4,8 +4,14 @@ import dev.dzsun.bookkeeping.core.money.Money
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
-/** 一笔流水是收入还是支出。 */
-enum class StatementDirection { EXPENSE, INCOME }
+/**
+ * 一笔流水的收支方向。
+ *
+ * [NEUTRAL] 不是"没填"，而是账单自己声明的**第三档**：钱动了，但既不是收入也不是支出。
+ * 实测支付宝写「不计收支」（596 笔里 34 笔），微信写 `/`（86 笔里 8 笔）。
+ * 充值、提现、还款、理财申赎都落在这里——混进收支会让「这个月花了多少」直接失真。
+ */
+enum class StatementDirection { EXPENSE, INCOME, NEUTRAL }
 
 /**
  * 从流水文件里解析出的一行，**已归一化**。
@@ -40,7 +46,14 @@ data class StatementRow(
 sealed interface RowVerdict {
     data class Consumption(val row: StatementRow) : RowVerdict
 
-    /** 转账、红包、理财存取、信用卡还款这类**资金转移**，不是消费。 */
+    /**
+     * 这笔钱动了，但**不是一笔已发生的收支**：转账、红包、理财存取、信用卡还款
+     * 这类资金转移，以及没成交（交易关闭）的那些。
+     *
+     * 两种都归这里而不是 [Unusable]，区别在于：这里说明「文件读懂了，是这行本来就不该入账」，
+     * 而 [Unusable] 是「读不懂或缺字段，可能是我漏了什么」。用户对前者的正确反应是放心，
+     * 对后者是来反馈。
+     */
     data class NotConsumption(val row: StatementRow, val reason: String) : RowVerdict
 
     /** 缺必需字段（单号/金额/时间），无法入账。 */
@@ -96,10 +109,22 @@ data class StatementFormat(
         StatementColumns.AMOUNT,
         StatementColumns.DIRECTION,
     ),
-    /** 「收/支」列里哪些值算支出、哪些算收入。 */
+    /**
+     * 「收/支」列里哪些值算支出、哪些算收入、哪些**既不是收入也不是支出**。
+     *
+     * 三个键：`expense` / `income` / `neutral`。第三档不是可选项——
+     * 支付宝写「不计收支」、微信写 `/`，落到 `neutral` 才不会被当成"方向无法识别"而报错。
+     */
     @SerialName("direction_values") val directionValues: Map<String, List<String>> = emptyMap(),
     /** 「交易类型」里这些取值属于**资金转移不是消费**，导入时要排除。 */
     @SerialName("non_consumption_types") val nonConsumptionTypes: List<String> = emptyList(),
+    /**
+     * 「交易状态」里这些取值说明**这笔没有成交**，导入时要排除。
+     *
+     * 只列点名的那些，**不要**写成"非成功即排除"：微信的「已全额退款」是成交后退的，
+     * 钱确实动过，将来要靠它发现状态变化并冲减。
+     */
+    @SerialName("skip_statuses") val skipStatuses: List<String> = emptyList(),
     /** 金额列可能带这些前缀/修饰，解析前要剥掉。 */
     @SerialName("amount_strip") val amountStrip: List<String> = listOf("¥", "￥", ",", "，"),
     /** 时间列的格式，按顺序试。 */

@@ -94,6 +94,17 @@ data class ImportOutcome(
     val failures: List<String>,
 )
 
+/** 「把文件变成解析结果」这一步的三种结局。 */
+private sealed interface ParseAttempt {
+    data class Parsed(val result: ParseResult) : ParseAttempt
+
+    /** 文件读不了或密码不对——已经带上给用户看的说法。 */
+    data class Refused(val preparation: ImportPreparation) : ParseAttempt
+
+    /** 是加密账单但还没给密码。这不是错误，是流程里正常的一步。 */
+    data object NeedsPassword : ParseAttempt
+}
+
 /**
  * 把流水文件变成账目。
  *
@@ -108,21 +119,51 @@ class StatementImporter @Inject constructor(
 
     /** 解析并分析，**不落库**。 */
     suspend fun prepare(request: ImportRequest): ImportPreparation = withContext(Dispatchers.IO) {
-        val csvBytes = when (val extracted = StatementArchive.open(request.bytes, request.password)) {
-            is ArchiveExtraction.Extracted -> extracted.bytes
-            ArchiveExtraction.NotZip -> request.bytes
-            is ArchiveExtraction.NeedsPassword -> return@withContext ImportPreparation.NeedsPassword
-            is ArchiveExtraction.WrongPassword -> return@withContext ImportPreparation.WrongPassword(extracted.fileName)
-            is ArchiveExtraction.Failed -> return@withContext ImportPreparation.Unreadable(extracted.reason)
+        when (val attempt = parseAny(request)) {
+            ParseAttempt.NeedsPassword -> ImportPreparation.NeedsPassword
+            is ParseAttempt.Refused -> attempt.preparation
+            is ParseAttempt.Parsed -> analyze(attempt.result, request)
+        }
+    }
+
+    /**
+     * 先把文件变成 [ParseResult]，认不出格式时如实说。
+     *
+     * **顺序有讲究**：xlsx 也是 zip，而且里面没有 csv 条目——若先走
+     * [StatementArchive]，它只会报「压缩包里没有找到 CSV 条目」，用户看到一句
+     * 与他手上的文件对不上的话。所以凡是有 zip 特征的文件都先按 xlsx 试一次，
+     * 试不出来（加密 zip、普通 zip+csv）再走原来的路。
+     */
+    private fun parseAny(request: ImportRequest): ParseAttempt {
+        val formats = catalog.formats()
+
+        if (!StatementArchive.isZip(request.bytes)) {
+            return ParseAttempt.Parsed(CsvStatementParser(formats).parse(request.bytes))
         }
 
-        val parsed = CsvStatementParser(catalog.formats()).parse(csvBytes)
-        if (parsed.format == null) {
-            return@withContext ImportPreparation.Unreadable(
+        XlsxStatementParser(formats).parse(request.bytes)
+            .takeIf { it.format != null }
+            ?.let { return ParseAttempt.Parsed(it) }
+
+        return when (val extracted = StatementArchive.open(request.bytes, request.password)) {
+            is ArchiveExtraction.Extracted ->
+                ParseAttempt.Parsed(CsvStatementParser(formats).parse(extracted.bytes))
+            ArchiveExtraction.NotZip ->
+                ParseAttempt.Parsed(CsvStatementParser(formats).parse(request.bytes))
+            is ArchiveExtraction.NeedsPassword -> ParseAttempt.NeedsPassword
+            is ArchiveExtraction.WrongPassword ->
+                ParseAttempt.Refused(ImportPreparation.WrongPassword(extracted.fileName))
+            is ArchiveExtraction.Failed ->
+                ParseAttempt.Refused(ImportPreparation.Unreadable(extracted.reason))
+        }
+    }
+
+    private suspend fun analyze(parsed: ParseResult, request: ImportRequest): ImportPreparation {
+        val format = parsed.format
+            ?: return ImportPreparation.Unreadable(
                 reason = "认不出这份账单的格式",
                 warnings = parsed.warnings,
             )
-        }
 
         val entries = mutableListOf<PlannedEntry>()
         val duplicates = mutableListOf<PlannedEntry>()
@@ -146,10 +187,10 @@ class StatementImporter @Inject constructor(
             if (planned.duplicateCandidates.isEmpty()) entries += planned else duplicates += planned
         }
 
-        ImportPreparation.Ready(
+        return ImportPreparation.Ready(
             ImportPlan(
-                formatId = parsed.format.id,
-                formatName = parsed.format.displayName,
+                formatId = format.id,
+                formatName = format.displayName,
                 warnings = parsed.warnings,
                 entries = entries,
                 duplicates = duplicates,
@@ -166,6 +207,8 @@ class StatementImporter @Inject constructor(
         val fallback = when (row.direction) {
             StatementDirection.EXPENSE -> request.fallbackExpenseCategoryId
             StatementDirection.INCOME -> request.fallbackIncomeCategoryId
+            // 不计收支的行在解析阶段就被判成 NotConsumption，走不到这里
+            StatementDirection.NEUTRAL -> error("不计收支的行不该进入入账计划（第 ${row.rowNumber} 行）")
         }
         val categoryId = remembered ?: fallback
         val name = repository.accountName(categoryId).orEmpty()
@@ -227,6 +270,10 @@ internal fun toJournalDraft(entry: PlannedEntry): JournalDraft {
             note = row.description,
             source = JournalSource.STATEMENT,
         )
+
+        // 复式记账的两个方向之外没有第三种可能。解析层已把「不计收支」挡在
+        // NotConsumption 里，所以这里是不该发生的——让它响，别让它默默记成一笔支出。
+        StatementDirection.NEUTRAL -> error("不计收支的行不该入账（第 ${row.rowNumber} 行）")
     }
     return base.copy(
         // 分类来自用户以前的选择才敢置「已核对」；来自兜底的是猜的，留待确认。
