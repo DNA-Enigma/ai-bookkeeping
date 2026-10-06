@@ -23,6 +23,14 @@ import org.junit.Test
  * 之所以值得留这么一份：`core/network` 的形状全是**实测反推**的，而实测结论
  * 一旦写成文档就会过期。把「能跑通」变成一条可重复执行的断言，比在报告里
  * 写一句「已验过」可靠——下次契约漂了，这条会红。
+ *
+ * ⚠️ **读绿之前先看清它验到了什么。** 收据链路目前服务端不稳（实测 2026-10-06：
+ * 4 次里 3 次失败，`normalize` 8 秒超时、`extract` agent 4 轮未出结果），
+ * 所以图片那条多数会落到 `Failed` 分支，而失败任务的快照 `artifacts` 常常是 `{}`——
+ * 那种情况下两条"服务端给了就得带出来"的断言都无从相比。
+ * 也就是说：**绿 = 服务端这次给的东西我们没丢**，不等于「收据链路是通的」。
+ * 置信度透出的真正证明在 `CaptureModelsTest`（拿实测快照原文做夹具，且已验证过
+ * 去掉修复就会红）。
  */
 class CaptureClientLiveTest {
 
@@ -68,6 +76,25 @@ class CaptureClientLiveTest {
                 assertNotNull("失败必须给出可读的原因", outcome.problem)
                 assertCarriesEveryArtifactTheServerHas(outcome)
             }
+        }
+    }
+
+    /**
+     * 客户端**不许比服务端少给**：快照里 `extract` 带了置信度，就必须原样透出来。
+     *
+     * 和下面那条失败断言同样的写法——不硬断言"一定有"，而是回查快照再比：
+     * 服务端哪天不给置信度了不会假红（那是服务端的事，快照里看得见），
+     * 但客户端把它丢了必定红。这正是我这边要守的那条线。
+     */
+    private suspend fun assertSurfacesServerConfidence(taskId: String, actual: Float?) {
+        val snapshot = DispatcherClient(liveConfig()).getTask(taskId)
+        val serverConfidence = snapshot.artifacts.receiptFields()?.confidence?.toFloat()
+        if (serverConfidence != null) {
+            assertEquals(
+                "快照里 extract 带着置信度，客户端却丢了——自动入账会静默退化成每笔都问",
+                serverConfidence,
+                actual,
+            )
         }
     }
 
@@ -121,6 +148,8 @@ class CaptureClientLiveTest {
                     "置信度应落在 0..1：${outcome.confidence}",
                     outcome.confidence!! in 0f..1f,
                 )
+                // 而且必须与服务端快照里的值一致——"有值"不等于"是那个值"
+                assertSurfacesServerConfidence(outcome.taskId, outcome.confidence)
             }
 
             is CaptureOutcome.NeedsClarification -> {
@@ -133,6 +162,13 @@ class CaptureClientLiveTest {
                 // 这时半截产物必须还在，用户核对一下就能入账。
                 assertNotNull("失败必须给出可读的原因", outcome.problem)
                 assertCarriesEveryArtifactTheServerHas(outcome)
+                // 半截产物里的置信度同样不许丢：用户核对完照样要走「高置信直接入账」，
+                // 丢了就每笔都得多问一次。**这条路才是实测里最常走到的**
+                // （收据链路的下游节点目前不稳，多数运行落在这里）
+                assertSurfacesServerConfidence(
+                    outcome.taskId,
+                    outcome.partialFields?.confidence?.toFloat(),
+                )
             }
         }
     }
