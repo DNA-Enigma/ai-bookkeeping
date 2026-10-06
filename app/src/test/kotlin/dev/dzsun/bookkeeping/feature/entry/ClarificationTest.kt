@@ -1,9 +1,11 @@
 package dev.dzsun.bookkeeping.feature.entry
 
+import dev.dzsun.bookkeeping.core.network.ClarificationOption
 import dev.dzsun.bookkeeping.core.network.FieldEdit
 import dev.dzsun.bookkeeping.core.network.ReceiptFields
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -109,5 +111,42 @@ class ClarificationTest {
         assertEquals("", draft.amountText)
         assertEquals(42L, draft.dateEpochDay)
         assertTrue(!draft.isHighConfidence)
+    }
+
+    // —— 无选项澄清：自由文本是契约里唯一可用的答复路径 ——
+
+    private val options = listOf(
+        ClarificationOption("expense", "支出"),
+        ClarificationOption("income", "收入"),
+    )
+
+    @Test
+    fun `empty options require free text`() {
+        assertFalse(canAnswerClarification(emptyList(), "", ""))
+        assertFalse(canAnswerClarification(emptyList(), "", "   "))
+        assertTrue(canAnswerClarification(emptyList(), "", "38 元，微信"))
+    }
+
+    @Test
+    fun `options present require a selection not free text`() {
+        assertTrue(canAnswerClarification(options, "expense", ""))
+        assertFalse(canAnswerClarification(options, "", "随便写点什么"))
+    }
+
+    @Test
+    fun `free text answer carries free_text and no answer_id`() {
+        val answer = buildClarificationAnswer("q1", optionId = null, freeText = "  38 元，微信  ")
+        assertNotNull(answer)
+        assertNull(answer!!.answerId)
+        assertEquals("38 元，微信", answer.freeText)
+    }
+
+    @Test
+    fun `option answer carries answer_id and neither is blank returns null`() {
+        val answer = buildClarificationAnswer("q1", optionId = "expense", freeText = null)
+        assertEquals("expense", answer!!.answerId)
+        assertNull(answer.freeText)
+        assertNull(buildClarificationAnswer("q1", optionId = null, freeText = null))
+        assertNull(buildClarificationAnswer("q1", optionId = "  ", freeText = " "))
     }
 }

@@ -207,7 +207,9 @@ private fun AiEntryBody(state: AddEntryUiState, viewModel: AddEntryViewModel) {
         state.pendingClarification?.let { clarification ->
             ClarificationCard(
                 clarification = clarification,
-                onAnswer = viewModel::onClarificationAnswer,
+                onAnswer = { optionId, freeText ->
+                    viewModel.onClarificationAnswer(optionId, freeText)
+                },
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }

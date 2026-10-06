@@ -17,6 +17,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,21 +28,29 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.dzsun.bookkeeping.core.network.ClarificationOption
 import dev.dzsun.bookkeeping.core.network.PendingClarification
 
 /**
  * 澄清渲染器：只吃服务端（或本地合成）的 [PendingClarification]，
  * 不写死表单。选项、文案、是否阻断全部由数据驱动。
+ *
+ * 服务端下发的澄清**可以没有选项**（实测就是 `options: []`）。
+ * 那时 [freeText] 是契约里唯一可用的答复路径，所以这里必须留自由输入——
+ * 否则按钮永远灰着、任务又 `blocking`，用户和任务一起卡死。
  */
 @Composable
 fun ClarificationCard(
     clarification: PendingClarification,
-    onAnswer: (optionId: String) -> Unit,
+    onAnswer: (optionId: String?, freeText: String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val hasOptions = clarification.options.isNotEmpty()
     var selectedId by remember(clarification.questionId) {
         mutableStateOf(clarification.options.firstOrNull()?.id.orEmpty())
     }
+    var freeText by remember(clarification.questionId) { mutableStateOf("") }
+    val canSubmit = canAnswerClarification(clarification.options, selectedId, freeText)
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -65,25 +74,44 @@ fun ClarificationCard(
                 )
             }
             Spacer(Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                clarification.options.forEach { option ->
-                    FilterChip(
-                        selected = selectedId == option.id,
-                        onClick = { selectedId = option.id },
-                        label = { Text(option.label) },
-                    )
+            if (hasOptions) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    clarification.options.forEach { option ->
+                        FilterChip(
+                            selected = selectedId == option.id,
+                            onClick = { selectedId = option.id },
+                            label = { Text(option.label) },
+                        )
+                    }
                 }
+            } else {
+                OutlinedTextField(
+                    value = freeText,
+                    onValueChange = { freeText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("补充说明") },
+                    placeholder = { Text("把问题里要的信息写在这里，比如「38 元，微信」") },
+                    minLines = 2,
+                )
             }
             Spacer(Modifier.height(12.dp))
             Button(
-                onClick = { onAnswer(selectedId) },
-                enabled = selectedId.isNotBlank(),
+                onClick = {
+                    if (hasOptions) onAnswer(selectedId, null) else onAnswer(null, freeText.trim())
+                },
+                enabled = canSubmit,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("按「${clarification.options.firstOrNull { it.id == selectedId }?.label ?: "所选"}」继续")
+                Text(
+                    if (hasOptions) {
+                        "按「${clarification.options.firstOrNull { it.id == selectedId }?.label ?: "所选"}」继续"
+                    } else {
+                        "继续"
+                    },
+                )
             }
             if (clarification.blocking) {
                 Spacer(Modifier.height(4.dp))

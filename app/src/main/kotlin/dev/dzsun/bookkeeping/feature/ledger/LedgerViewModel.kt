@@ -10,8 +10,10 @@ import dev.dzsun.bookkeeping.core.platform.Clock
 import java.time.temporal.TemporalAdjusters
 import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -24,9 +26,18 @@ data class LedgerUiState(
     val entries: List<LedgerRow> = emptyList(),
     val monthExpenseMinor: Long = 0L,
     val monthIncomeMinor: Long = 0L,
+    val todayExpenseMinor: Long = 0L,
     val isLoading: Boolean = true,
 ) {
     val balanceMinor: Long get() = monthIncomeMinor - monthExpenseMinor
+
+    /** 月预算（最小单位）。目前本地固定，后续接设置/服务端。 */
+    val budgetMinor: Long get() = 1_200_00L
+
+    val budgetUsedFraction: Float
+        get() = if (budgetMinor <= 0L) 0f else (monthExpenseMinor.toFloat() / budgetMinor).coerceIn(0f, 1f)
+
+    val budgetRemainingMinor: Long get() = (budgetMinor - monthExpenseMinor).coerceAtLeast(0L)
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -41,6 +52,13 @@ class LedgerViewModel @Inject constructor(
     private val monthEnd = today.with(TemporalAdjusters.lastDayOfMonth())
     private val monthLabel = "${today.year} 年 ${today.monthValue} 月"
 
+    private val _hideAmounts = MutableStateFlow(false)
+    val hideAmounts: StateFlow<Boolean> = _hideAmounts.asStateFlow()
+
+    fun toggleHideAmounts() {
+        _hideAmounts.value = !_hideAmounts.value
+    }
+
     val uiState: StateFlow<LedgerUiState> = repository.observeBaseCurrency()
         .flatMapLatest { currency ->
             // 科目表还没建好时没有本位币可用，此时账本必然也是空的。
@@ -51,7 +69,8 @@ class LedgerViewModel @Inject constructor(
                     repository.observeEntries(),
                     repository.observeTotal(AccountType.EXPENSE, currency, monthStart, monthEnd),
                     repository.observeTotal(AccountType.INCOME, currency, monthStart, monthEnd),
-                ) { entries, expense, income ->
+                    repository.observeTotal(AccountType.EXPENSE, currency, today, today),
+                ) { entries, expense, income, todayExpense ->
                     LedgerUiState(
                         monthLabel = monthLabel,
                         currency = currency,
@@ -59,6 +78,7 @@ class LedgerViewModel @Inject constructor(
                         // 支出分类一侧的分录恒为正，收入一侧恒为负，这里统一成正数交给界面决定符号
                         monthExpenseMinor = expense,
                         monthIncomeMinor = -income,
+                        todayExpenseMinor = todayExpense,
                         isLoading = false,
                     )
                 }

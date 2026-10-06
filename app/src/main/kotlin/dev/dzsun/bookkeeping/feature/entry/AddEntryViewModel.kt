@@ -13,6 +13,7 @@ import dev.dzsun.bookkeeping.core.network.CaptureClient
 import dev.dzsun.bookkeeping.core.network.CaptureOutcome
 import dev.dzsun.bookkeeping.core.network.CaptureRequest
 import dev.dzsun.bookkeeping.core.network.ClarificationAnswer
+import dev.dzsun.bookkeeping.core.network.FeedbackVerdict
 import dev.dzsun.bookkeeping.core.network.FieldEdit
 import dev.dzsun.bookkeeping.core.network.MediaPayload
 import dev.dzsun.bookkeeping.core.network.PendingClarification
@@ -331,17 +332,19 @@ class AddEntryViewModel @Inject constructor(
         collectFieldEdits(baseline, card)
     }
 
-    /** 用户选定澄清选项后落地：本地合成的选项直接改卡片，服务端的回 `ClarificationAnswer`。 */
-    fun onClarificationAnswer(optionId: String) {
+    /**
+     * 用户答复澄清后落地。
+     *
+     * 本地合成的选项直接改卡片；服务端的回 [ClarificationAnswer]。
+     * 服务端可能下发**没有选项**的澄清，那时走 [freeText]——契约里
+     * `answer_id` 与 `free_text` 都可空，但至少给一个，否则等于没回答。
+     */
+    fun onClarificationAnswer(optionId: String? = null, freeText: String? = null) {
         val current = _state.value
         val clarification = current.pendingClarification ?: return
-        val answer = ClarificationAnswer(
-            questionId = clarification.questionId,
-            optionId = optionId,
-            edits = current.fieldEdits,
-        )
+        val answer = buildClarificationAnswer(clarification.questionId, optionId, freeText) ?: return
         // 本地合成的 kind 澄清：选项直接决定方向
-        kindFromOptionId(optionId)?.let { kind ->
+        optionId?.let { kindFromOptionId(it) }?.let { kind ->
             val id = clarification.questionId.removePrefix("local-")
             _state.update { s ->
                 val cards = s.cards.map {
@@ -410,7 +413,7 @@ class AddEntryViewModel @Inject constructor(
                         clarificationPort.feedback(
                             current.activeTaskId,
                             TaskFeedback(
-                                verdict = if (edits.isEmpty()) "confirmed" else "edited",
+                                verdict = if (edits.isEmpty()) FeedbackVerdict.ACCEPTED else FeedbackVerdict.EDITED,
                                 edits = edits,
                             ),
                         )

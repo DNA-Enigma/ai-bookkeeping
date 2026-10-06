@@ -89,6 +89,30 @@ fun kindFromOptionId(optionId: String): EntryKind? = when (optionId) {
 }
 
 /**
+ * 能否提交澄清答复。
+ *
+ * 有选项时必须选一个；**没有选项时只能靠自由文本**——
+ * 服务端实测会下发 `options: []` 的澄清，那时按钮若还绑在选项上就是死路。
+ */
+fun canAnswerClarification(
+    options: List<ClarificationOption>,
+    optionId: String,
+    freeText: String,
+): Boolean = if (options.isEmpty()) freeText.isNotBlank() else optionId.isNotBlank()
+
+/** 把用户的选项/自由文本组装成契约答复。两者都空时返回 null——等于没回答。 */
+fun buildClarificationAnswer(
+    questionId: String,
+    optionId: String?,
+    freeText: String?,
+): ClarificationAnswer? {
+    val id = optionId?.takeIf { it.isNotBlank() }
+    val text = freeText?.trim()?.takeIf { it.isNotEmpty() }
+    if (id == null && text == null) return null
+    return ClarificationAnswer(questionId = questionId, answerId = id, freeText = text)
+}
+
+/**
  * 调度层抽出来的票据字段 → 确认卡。金额走 [ReceiptFields.money]，不经过浮点。
  * 分类按名字从科目池匹配，匹配不上留空由用户选——分类是数据不是代码。
  */
