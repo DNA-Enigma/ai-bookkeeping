@@ -114,7 +114,7 @@ fun LedgerScreen(
                 .size(56.dp)
                 .clip(CircleShape)
                 .background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primary, IncomeGreen)))
-                .clickable { onAddEntry() },
+                .clickable { onAskClick() },
             contentAlignment = Alignment.Center,
         ) {
             Text("AI", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
@@ -136,9 +136,7 @@ private fun HomeTopBar(onAskClick: () -> Unit) {
             fontWeight = FontWeight.Bold,
         )
         Spacer(Modifier.weight(1f))
-        IconButton(onClick = {}) {
-            Icon(Icons.Default.CalendarMonth, contentDescription = "日历")
-        }
+        // 日历：功能未实现，暂不展示
         IconButton(onClick = onAskClick) {
             Icon(Icons.Default.AutoAwesome, contentDescription = "问账")
         }

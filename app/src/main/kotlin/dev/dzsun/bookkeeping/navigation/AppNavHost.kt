@@ -128,7 +128,7 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
                 )
             }
             composable(Routes.STATS) {
-                StatsScreen()
+                StatsScreen(onAskClick = { navController.navigate(Routes.ASK) })
             }
             composable(Routes.DISCOVER) {
                 DiscoverScreen()

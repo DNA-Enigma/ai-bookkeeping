@@ -3,6 +3,7 @@ package dev.dzsun.bookkeeping.feature.stats
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -61,7 +62,10 @@ import kotlin.math.abs
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StatsScreen(viewModel: StatsViewModel = hiltViewModel()) {
+fun StatsScreen(
+    onAskClick: () -> Unit = {},
+    viewModel: StatsViewModel = hiltViewModel(),
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
     Scaffold(
@@ -71,7 +75,7 @@ fun StatsScreen(viewModel: StatsViewModel = hiltViewModel()) {
                     Text("收支报表", fontWeight = FontWeight.Bold)
                 },
                 actions = {
-                    TextButton(onClick = {}) { Text("订阅设置") }
+                    // 订阅设置：暂时隐藏（未实现的功能不展示）
                 },
             )
         },
@@ -96,7 +100,7 @@ fun StatsScreen(viewModel: StatsViewModel = hiltViewModel()) {
                 }
             }
 
-            item { AiSummaryCard(state) }
+            item { AiSummaryCard(state, onAskClick) }
             item { StatsGrid(state) }
             item { TrendCard(state) }
             item { CategoryCard(state) }
@@ -107,7 +111,7 @@ fun StatsScreen(viewModel: StatsViewModel = hiltViewModel()) {
 }
 
 @Composable
-private fun AiSummaryCard(state: StatsUiState) {
+private fun AiSummaryCard(state: StatsUiState, onAskClick: () -> Unit = {}) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -146,7 +150,12 @@ private fun AiSummaryCard(state: StatsUiState) {
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
             )
             Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clickable { onAskClick() }
+                    .padding(top = 4.dp),
+            ) {
                 Text("查看 AI 账单分析", color = BrandBlue, fontWeight = FontWeight.SemiBold)
                 Icon(Icons.Default.ChevronRight, contentDescription = null, tint = BrandBlue, modifier = Modifier.size(16.dp))
             }
