@@ -1183,3 +1183,76 @@ class DbAutoEntryUndo @Inject constructor(private val database: LedgerDatabase) 
 **本次只提交界面侧**（`feature/entry/**` + 测试 + 路线图）。
 `core/**`、`feature/report/**`、`core/statement/**` 的未提交改动是你们/别人的，
 我一个字没碰——工作区里那批 `RefundReversal`/`Budget`/`MonthlyReport` 看着像并行的活。
+
+### 2026-10-07 · P1-a 收尾：本地词法翻译层（`core/ledger` + `feature/ask`）
+
+问账的三段（判定/算术/措辞）之前是通的，但**判定那一段是空的**——
+`LedgerQueryClient` 要的是调度层下发的 `LedgerQuerySpec`，而调度层产不出它：
+`query_ledger` 读的是它自己的 `LedgerPort`（内存实现），实测恒返回
+`{"entries": [], "count": 0}`。于是「这个月花了多少」每次都会答「答不了」。
+
+**补的是那一环：`core/ledger/LocalQueryTranslator.kt`。**
+
+#### 它是什么、不是什么
+
+- **是降级路径**，和拍照路径的 `LocalAiParser` 同一个位置：调度层给出查询结构就用调度层的，
+  **只有它给不出时才落到这里**（`AskViewModel.resolve` 的 `Unavailable` 分支）。
+  后端把 `bookkeeping.ledger.query` 的结构定下来之后，这条路自动退居二线，界面一行不用改。
+- **不是模型**。它解决的是有限的一小组句式（时间词 + 收支方向 + 商户/分类），
+  有界的词表配上逐条的边界单测，错了能一眼看出错在哪条；一个本地模型既测不了也解释不了。
+
+#### 为什么没用 `direct_llm`
+
+看了 `stages/direct.py`：`direct_llm` 是一条**补全**，产物是 `{answer, tier, latency_ms}`——
+一段话，不是一个结构。提示词在服务端（`prompts/direct_answer.md`），客户端改不了，
+所以拿它「返回结构化查询 JSON」要靠模型自觉，形状不可控。等后端把
+`query_ledger` 的产出形状定下来，走那条路才成立。**这一层不挡那条路。**
+
+#### 三条刻意的口径
+
+1. **光有时间词不算一次问账。**「今天天气」里有「今天」，但没有任何"要算什么"的信号。
+   放行的话会拿「天气」当商户名查出「没有记录」，看着像答了其实答非所问。
+   判据是「方向词 or 疑问词至少要有一个」。
+2. **分类名从科目表读，不写死**（约定 3）。同一句「这个月的餐饮花了多少」，
+   在含「餐饮」的科目表下是分类查询，在不含的科目表下退化成商户包含匹配——
+   这条有单测钉着。取最长匹配，所以「其他支出」不会被「支出」切碎。
+3. **认不出来返回 null**，交给界面如实说「翻译不了」，绝不拿空结果冒充「你没花过钱」。
+
+#### 已知弱点（写在这里，免得被当成 bug 反复报）
+
+- 中文没有词边界，「**交通银行**」里含分类名「交通」，会被认成**分类**而不是商户。
+  取长匹配的代价。
+- 因此本地翻译出的答案**脚注里会标明「这句话是按本地规则理解的，没有经过调度层」**——
+  用户看得见来源，才有机会发现答案不是他要问的。这条不是可选的，别删。
+
+#### 动了哪些文件（跨了两边，说明理由）
+
+| 文件 | 归属 | 改了什么 |
+|---|---|---|
+| `core/ledger/LocalQueryTranslator.kt` | 数据层 | 新增（`@Singleton`，注入 `LedgerDatabase` 读分类名） |
+| `app/src/test/.../core/ledger/LocalQueryTranslatorTest.kt` | 数据层 | 新增 27 个用例 |
+| `feature/ask/AskViewModel.kt` | 界面 | 注入翻译器，`Unavailable` 时退回本地；答案脚注标来源 |
+| `app/build.gradle.kts` | 共用 | 版本 `0.10.0` → **`0.11.0`**（versionCode 10） |
+
+`core/database`、`core/network` 一个字没碰。`LocalQueryTranslator` 是加法，
+没有依赖 `AppModule` 的新绑定——Hilt 直接构造它（`LedgerDatabase` 本来就有提供）。
+
+#### 验证
+
+`tools/build.sh :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**。
+`--rerun-tasks` 全量重跑：**303 个测试 0 失败 4 跳过**（跳过的是 4 个联调用例，
+要 `DISPATCHER_LIVE=1`），新增 `LocalQueryTranslatorTest` 27 个全过。
+
+边界逐条钉死了：月末问本月收在 31 号、闰年二月 29 天、跨年那周的「上周」落在去年
+（`2026-01-02` → `2025-12-22 ~ 12-28`）、昨天跨月、近三个月是「本月往前两个整月」
+而不是倒推 90 天。
+
+**没做端到端真机验证**（模拟器没起）：判定→算术→措辞三段各自的单测都过，
+但「输入框敲一句话→出答案卡片」这条完整路径我没在设备上走过。界面同事如果方便，
+`AskScreen` 的三个例句现在应该都能出答案了。
+
+#### 还没做的
+
+- `direct_llm` 那条路（要后端先定 `query_ledger` 的产出形状）；
+- 多商户问句（「星巴克和瑞幸花了多少」）会被当成一个商户名——
+  本地词法不做切分，`LIKE '%星巴克和瑞幸%'` 匹配不到，答「没有记录」。等调度层。
