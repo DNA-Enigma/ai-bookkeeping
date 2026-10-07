@@ -16,10 +16,17 @@ import kotlinx.serialization.json.Json
 class UpdateConfig @Inject constructor() {
 
     /**
-     * 版本清单地址。默认指向本地那台自托管服务器（`tools/serve-apk.sh` 起的那个），
-     * 它同时提供 APK 与 `version.json`。
+     * 版本清单地址。默认指向 **GitHub Releases**（`tools/release-apk.sh` 发布的那个）。
      *
-     * 真机上要改成局域网地址——`10.0.2.2` 只是模拟器访问宿主机的别名。
+     * 为什么不是以前的 `http://10.0.2.2:8080/version.json`（2026-10-07 改）：
+     * ① `10.0.2.2` 是**模拟器访问宿主机的别名**，真机上指向不存在的地方；
+     * ② release 构建的 `network_security_config.xml` 是
+     *    `cleartextTrafficPermitted="false"`，**明文 HTTP 会被系统直接拦**，必须 https；
+     * ③ `releases/latest/download/<资产名>` 这条 URL **永远指向最新一版**，
+     *    所以客户端出厂写死这一次就够了，以后每次发版都不用再改客户端。
+     *
+     * 发版走 `tools/release-apk.sh`（打包 → version.json → `gh release create`）。
+     * 本地调试仍可用 `tools/serve-apk.sh`，在这里覆盖 [manifestUrl] 即可。
      */
     @Volatile
     var manifestUrl: String = DEFAULT_MANIFEST_URL
@@ -27,7 +34,8 @@ class UpdateConfig @Inject constructor() {
     val isConfigured: Boolean get() = manifestUrl.isNotBlank()
 
     companion object {
-        const val DEFAULT_MANIFEST_URL = "http://10.0.2.2:8080/version.json"
+        const val DEFAULT_MANIFEST_URL =
+            "https://github.com/DNA-Enigma/ai-bookkeeping/releases/latest/download/version.json"
     }
 }
 

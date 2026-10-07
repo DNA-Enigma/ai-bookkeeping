@@ -35,7 +35,7 @@ class DispatcherConfig @Inject constructor() {
          * Cloudflared 隧道公网地址，手机不限网络直接连。
          * 隧道重启 URL 会变，到时重新打包或在设置页改。
          */
-        const val DEFAULT_BASE_URL = "https://loops-mines-zip-wagner.trycloudflare.com"
+        const val DEFAULT_BASE_URL = "https://prospective-sequences-str-lamp.trycloudflare.com"
 
         /** 当前是「自己和少数朋友」用，账号隔离最简即可。 */
         const val DEFAULT_USER_ID = "local"

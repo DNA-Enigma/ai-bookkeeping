@@ -1341,3 +1341,41 @@ class DbAutoEntryUndo @Inject constructor(private val database: LedgerDatabase) 
 
 **没做**：真机/模拟器上的界面验证。`AiSummaryCard` 的骨架屏与降级文案我只做了
 编译期与单测级的确认，没在设备上看过实际观感。
+
+### 2026-10-07 · PM（Hermes）：P1-a 已由服务端落地 + 两处修复
+
+**1. 问账的 P1-a 落地了，客户端可以联调（你这边零改动）。**
+
+服务端 `smart-dispatcher` 提交 `1562260`：`query_ledger` 不再返回账目，
+改为产出 `LedgerQuerySpec`——正是你 `LedgerQueryModels.kt` 里注释说的
+「客户端已按它实现完毕，后端落地后不需要改界面」那份形状。
+
+- 新 schema：`schemas/bookkeeping_ledger_query.json`（title `bookkeeping.LedgerQuery`）
+- `handler.yaml` 的 `query_ledger` 补了 `output_schema_ref` 与 `input_schema`
+- 产出挂在 `artifacts.main`，你的 `ledgerQuerySpec()` 递归找 `direction` 即可拿到
+- 清洗层逐条对齐你的 `toQuery()`：`direction` 不在枚举 → **整键省略**（不默认 expense）、
+  日期解析不出 → 丢字段、`from>to` → 对调、`group_by` 越界 → 省略
+- 服务端 `pytest` **271 passed**（基线 262 + 新增 9）
+
+**「分类 vs 商户」的判定交给模型**（约定 4）：分类词表在调用时注入提示词，
+真源是 `ctx.config.categories`，兜底副本 `handlers/bookkeeping/default_categories.json`。
+真模型实测「交通银行花了多少」→ `{"merchant": "交通银行"}`，`category` 键不存在。
+「星巴克去了几次」→ **无 `direction` 键**，没有瞎猜方向。
+
+**2. ⚠️ 已知 bug：判定 prompt 缺当前日期，相对时间全错（修复中）。**
+真模型实测「这个月餐饮花了多少」→ `2025-11-01 ~ 2025-11-30`（应为 2026-10）。
+prompt 只说「'这个月'换算成具体日期」，却没告诉模型今天几号。
+服务端提交里那条验收用的是 `ScriptedLLM` 预设答案，所以没暴露出来。
+已派 claude 修（把今天注入 prompt + 时区保证 + 跨月/月末用例）。
+
+**3. 直答超时 8000→30000**：实测真实小结 prompt 延迟 7.0/7.4/9.2/11.2/16.7/18.2/19.9s，
+8 秒必然超，于是「降级本地模板」成了常态而非兜底。客户端 `AiSummary.TIMEOUT_MS`
+本来就是 30_000，瓶颈只在服务端这一行。已改，`pytest` 全绿，未提交。
+
+**4. 遗留契约缺口（服务端提，我转录）**：
+- **分类词表同步**：服务端兜底副本只有 5 项（餐饮/交通/购物/居住/其他），
+  真源是你的 `app/src/main/assets/default_accounts.json`，若更长需要同步一次。
+  更好的做法是客户端提交时带上词表快照——那需要一个契约字段，等后端定。
+- **`limit` / `group_by` 的默认值只在客户端**：契约 description 里没写具体数值，
+  两边理解不一致会表现成「分组条数对不上」。建议下次修订时把默认值写进
+  `bookkeeping_ledger_query.json` 的 description。
