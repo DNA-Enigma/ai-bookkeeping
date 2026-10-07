@@ -2,25 +2,20 @@ package dev.dzsun.bookkeeping.feature.report
 
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dev.dzsun.bookkeeping.core.ledger.CategoryBudget
+import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.json.Json
 
 /**
  * 分类月度预算的存取口。
  *
- * **这里是留给数据层的对接点。** 预算终究该和账本存在一起（同一次迁移、同一份备份、
- * 同一个事务），而账本是数据层的。现在那边还没有 budget 表，所以先用
- * [PrefsBudgetStore] 落地在本地 prefs——够把界面跑通、够让用户真的设得上预算。
- *
- * 等 `LedgerRepository` 给出预算查询与写入，在 `ReportModule` 里换绑定即可：
- * 报表页、预算页、记账后的提醒都只认这个接口，一行都不用改。
+ * 报表页、预算页、记账后的提醒都只认这个接口，不直接依赖 [LedgerRepository]——
+ * 换数据来源时只动 `ReportModule` 里的一个绑定。
  */
 interface BudgetStore {
 
@@ -32,77 +27,32 @@ interface BudgetStore {
 }
 
 /**
- * 预算的落盘格式。
+ * 预算落在账本库里（`budget` 表），由 [LedgerRepository] 读写。
  *
- * 用 JSON 而不是自己拼分隔符：分类 id 现在是 `expense.food` 这种固定形状，
- * 但「分类是数据不是代码」（AGENTS.md 约定 3），用户自建的分类 id 什么形状都可能有，
- * 拼分隔符迟早会遇到一个把自身格式撑破的 id，而那是**静默丢预算**。
- * 单测直接盖住编解码往返。
+ * 此前预算存在 SharedPreferences 里（一个界面侧的 prefs 实现）。搬进库里的理由不是
+ * 「表更正式」，而是**预算和账本必须是同一份数据**：同一个迁移、同一次备份、
+ * 同一个事务。分开存的时候，用户换机/恢复备份会得到一本账配上另一套预算线，
+ * 而这种错配是静默的——数字都还在，只是互相对不上。
  */
-internal object BudgetCodec {
-
-    @Serializable
-    internal data class StoredBudget(val categoryId: String, val amountMinor: Long)
-
-    private val json = Json { ignoreUnknownKeys = true }
-    private val serializer = ListSerializer(StoredBudget.serializer())
-
-    fun encode(budgets: List<CategoryBudget>): String =
-        json.encodeToString(serializer, budgets.map { StoredBudget(it.categoryId, it.amountMinor) })
-
-    /**
-     * 解析失败按空处理。这是**有意的降级**：prefs 被外部写坏时，
-     * 让每个读预算的页面都崩掉，比显示"还没设预算"更糟。
-     * 写的一方只有我们自己，正常路径下不会产生解析不了的内容。
-     */
-    fun decode(raw: String?): List<CategoryBudget> {
-        if (raw.isNullOrBlank()) return emptyList()
-        val parsed = runCatching { json.decodeFromString(serializer, raw) }.getOrNull()
-            ?: return emptyList()
-        return parsed
-            // 非正金额与空 id 是坏数据，不进内存——留着会让界面显示一条点不动的预算
-            .filter { it.categoryId.isNotBlank() && it.amountMinor > 0L }
-            // 同一分类写了多条时以**最后一条**为准：读的时候不该出现两条互相打架的预算
-            .associateBy { it.categoryId }
-            .values
-            .map { CategoryBudget(it.categoryId, it.amountMinor) }
-            .sortedBy { it.categoryId }
-    }
-}
-
-/** 数据层的预算存储就绪前的落地实现。 */
 @Singleton
-class PrefsBudgetStore @Inject constructor(
-    @ApplicationContext context: Context,
+class RepositoryBudgetStore @Inject constructor(
+    private val repository: LedgerRepository,
 ) : BudgetStore {
 
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    override fun observeBudgets(): Flow<List<CategoryBudget>> = repository.observeBudgets()
 
-    private val _budgets = MutableStateFlow(BudgetCodec.decode(prefs.getString(KEY_BUDGETS, null)))
-
-    override fun observeBudgets(): Flow<List<CategoryBudget>> = _budgets.asStateFlow()
-
-    override suspend fun setBudget(categoryId: String, amountMinor: Long) {
-        if (categoryId.isBlank()) return
-        val next = (
-            _budgets.value.filterNot { it.categoryId == categoryId } +
-                if (amountMinor > 0L) listOf(CategoryBudget(categoryId, amountMinor)) else emptyList()
-            ).sortedBy { it.categoryId }
-        // 先落盘再发信号：读的人立刻拿到新值，进程被杀也不会退回旧值
-        prefs.edit().putString(KEY_BUDGETS, BudgetCodec.encode(next)).apply()
-        _budgets.value = next
-    }
-
-    private companion object {
-        const val PREFS_NAME = "budget_store"
-        const val KEY_BUDGETS = "category_budgets"
-    }
+    override suspend fun setBudget(categoryId: String, amountMinor: Long) =
+        repository.setBudget(categoryId, amountMinor)
 }
 
 /**
  * 预算提醒阈值的**用户设置**，与 `AutoConfirmSettings` 同一个套路：
  * 出厂默认值在 [BudgetThresholds]，用户调过的值存下来且**立刻生效**——
  * 记账页、报表页读的都是同一个源，不需要重启或重进页面。
+ *
+ * 阈值**刻意留在 prefs 而不是账本表里**：它是个人偏好（我提醒得早还是晚），
+ * 不是账本事实。预算额度进库是因为它要和账本一起备份；阈值进库只会让
+ * 「换个提醒线」变成一次数据库迁移。
  */
 interface BudgetSettings {
     val thresholds: StateFlow<BudgetThresholds>

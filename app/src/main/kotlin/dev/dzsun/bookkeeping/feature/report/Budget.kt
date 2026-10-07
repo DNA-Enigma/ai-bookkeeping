@@ -1,17 +1,7 @@
 package dev.dzsun.bookkeeping.feature.report
 
+import dev.dzsun.bookkeeping.core.ledger.CategoryBudget
 import kotlin.math.roundToLong
-
-/**
- * 某个分类的月度预算。
- *
- * 金额一律**整数最小单位**，与账本其余部分同一个口径——预算也是钱，
- * 用浮点存的话「餐饮 1100 元」这个数本身就会先失真。
- */
-data class CategoryBudget(
-    val categoryId: String,
-    val amountMinor: Long,
-)
 
 /**
  * 预算使用档位。
@@ -42,10 +32,11 @@ data class BudgetThresholds(
  *
  * 纯函数、无 Android 依赖，所以边界（刚好 80%、刚好 100%、没设预算）都能直接单测。
  *
- * **为什么这一层不放在 `core` 下**：预算目前是界面侧的能力（数据层的报表/预算查询
- * 还在做），阈值也只是提醒线的口径，不参与记账。等预算落进账本表结构、
- * 变成需要跨端一致的规则时，这段应当整体挪到数据层——判定放哪边，
- * 取决于谁拥有那份数据，不取决于它简单不简单。
+ * **为什么预算金额在 `core` 而这个判定不搬过去**：搬过去的是**数据**
+ * （`budget` 表里的额度、`CategoryBudget`），它跟着账本一起迁移、备份、进事务。
+ * 留在这里的是**用户的提醒线**（80% 算接近、100% 算超）——那是个人偏好，
+ * 不是账本事实，也不参与记账，界面有自己的设置页直接写它。
+ * 判定放哪边取决于谁拥有那份数据，`BudgetGate` 读的是阈值与花销，两边都不归它所有。
  */
 object BudgetGate {
 

@@ -29,8 +29,9 @@ class LedgerConverters {
         JournalEntity::class,
         PostingEntity::class,
         JournalItemEntity::class,
+        BudgetEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 @TypeConverters(LedgerConverters::class)
@@ -39,6 +40,8 @@ abstract class LedgerDatabase : RoomDatabase() {
     abstract fun journalDao(): JournalDao
     abstract fun postingDao(): PostingDao
     abstract fun journalItemDao(): JournalItemDao
+    abstract fun budgetDao(): BudgetDao
+    abstract fun ledgerQueryDao(): LedgerQueryDao
 
     companion object {
         /**
@@ -90,6 +93,31 @@ abstract class LedgerDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_journal_reversesJournalId " +
                         "ON journal(reversesJournalId)",
+                )
+            }
+        }
+
+        /**
+         * v3 → v4：分类的月度预算落表。
+         *
+         * 纯新增一张表，**不碰任何既有数据**，所以还是不用破坏性迁移。
+         * 主键即分类 id，没有索引要建（SQLite 的主键本身就有索引）、没有外键。
+         *
+         * 注意：预算此前存在 SharedPreferences 里（`PrefsBudgetStore`）。
+         * 这次是**换存储而不是搬数据**——旧 prefs 里的预算不会被读进这张表。
+         * 试点阶段版本没发出去过，用户重设一次即可；真要兼容得在开库前读一次 prefs。
+         */
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS budget (
+                        categoryId TEXT NOT NULL,
+                        amountMinor INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(categoryId)
+                    )
+                    """.trimIndent(),
                 )
             }
         }

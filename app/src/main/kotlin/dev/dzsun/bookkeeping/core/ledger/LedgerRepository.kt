@@ -3,6 +3,7 @@ package dev.dzsun.bookkeeping.core.ledger
 import androidx.room.withTransaction
 import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.database.AccountType
+import dev.dzsun.bookkeeping.core.database.BudgetEntity
 import dev.dzsun.bookkeeping.core.database.CategoryTotal
 import dev.dzsun.bookkeeping.core.database.DuplicateCandidate
 import dev.dzsun.bookkeeping.core.database.JournalEntity
@@ -17,7 +18,11 @@ import dev.dzsun.bookkeeping.core.platform.Clock
 import dev.dzsun.bookkeeping.core.platform.IdGenerator
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 
 /**
@@ -73,6 +78,90 @@ class LedgerRepository @Inject constructor(
      */
     fun observeMonthlyTotals(from: java.time.LocalDate, to: java.time.LocalDate): Flow<List<MonthlyTotal>> =
         database.postingDao().observeMonthlyTotals(from.toEpochDay(), to.toEpochDay())
+
+    /**
+     * 某个月的报表聚合：收入、支出、支出侧分类合计、上月支出。
+     *
+     * **一次问出一个月要的全部数**，把「哪个月对应哪段日期」这个决定收在数据层——
+     * 日期窗口（含闰年二月、12 月翻年）由 [MonthlyReportQuery] 算，界面不再自己拼
+     * `atDay(1)`/`atEndOfMonth()`，也就没有两处各拼一份、其中一处拼错的机会。
+     *
+     * 四个查询都在 SQL 里聚合（`PostingDao` 已排除 `VOID` 凭证），
+     * **不把整本账目拉进内存再筛**：账本只会越长越大，而报表一次只看一个月。
+     *
+     * 科目表还没建好（本位币未知）时，直接发一个零值聚合、**不去跑那四个查询**：
+     * 没有币种连 `Money` 都构造不出来，查了也用不上。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun observeMonthlyReport(yearMonth: java.time.YearMonth): Flow<MonthAggregate> {
+        val window = MonthlyReportQuery.window(yearMonth)
+        val previous = MonthlyReportQuery.previousWindow(yearMonth)
+        return observeBaseCurrency().flatMapLatest { currency ->
+            if (currency.isNullOrBlank()) {
+                flowOf(MonthlyReportQuery.assemble(yearMonth, null, 0L, 0L, emptyList(), 0L))
+            } else {
+                combine(
+                    database.postingDao().observeTotal(
+                        AccountType.INCOME, currency, window.fromEpochDay, window.toEpochDay,
+                    ),
+                    database.postingDao().observeTotal(
+                        AccountType.EXPENSE, currency, window.fromEpochDay, window.toEpochDay,
+                    ),
+                    database.postingDao().observeCategoryTotals(
+                        AccountType.EXPENSE, window.fromEpochDay, window.toEpochDay,
+                    ),
+                    database.postingDao().observeTotal(
+                        AccountType.EXPENSE, currency, previous.fromEpochDay, previous.toEpochDay,
+                    ),
+                ) { income, expense, categories, previousExpense ->
+                    MonthlyReportQuery.assemble(
+                        yearMonth = yearMonth,
+                        currency = currency,
+                        incomeTotal = income,
+                        expenseTotal = expense,
+                        categories = categories,
+                        previousExpenseTotal = previousExpense,
+                    )
+                }
+            }
+        }
+    }
+
+    /** 某分类在区间内已花的金额（预算用）。没有记录时是 0，不是 null。 */
+    fun observeCategorySpent(
+        categoryId: String,
+        from: java.time.LocalDate,
+        to: java.time.LocalDate,
+    ): Flow<Long> = database.postingDao()
+        .observeCategorySpent(categoryId, from.toEpochDay(), to.toEpochDay())
+
+    // ---------------------------------------------------------------- 预算
+
+    /**
+     * 全部已设预算。按分类 id 排序，界面的顺序才是稳定的。
+     *
+     * 预算与账本存在同一张库里，所以它跟着账本一起迁移、一起备份、一起进事务——
+     * 这正是它从 prefs 搬过来的理由。
+     */
+    fun observeBudgets(): Flow<List<CategoryBudget>> =
+        database.budgetDao().observeAll().map { rows ->
+            rows.map { CategoryBudget(it.categoryId, it.amountMinor) }
+        }
+
+    /**
+     * 写某分类的预算。**金额非正表示清除**这条预算——一个入口就够，不必开两个。
+     *
+     * 清除走 DELETE 而不是写一个 0：留着一行 0 会让界面显示一条点不动的预算，
+     * 而 [CategoryBudget] 的消费方也判不出「没设」与「设成 0」的区别。
+     */
+    suspend fun setBudget(categoryId: String, amountMinor: Long) {
+        if (categoryId.isBlank()) return
+        if (amountMinor > 0L) {
+            database.budgetDao().upsert(BudgetEntity(categoryId, amountMinor, clock.nowMillis()))
+        } else {
+            database.budgetDao().deleteByCategory(categoryId)
+        }
+    }
 
     /**
      * 落一笔账。凭证与分录在同一个事务里写入，

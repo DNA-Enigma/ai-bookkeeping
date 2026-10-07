@@ -223,6 +223,24 @@ interface JournalItemDao {
     suspend fun deleteByJournal(journalId: String)
 }
 
+@Dao
+interface BudgetDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(budget: BudgetEntity)
+
+    /**
+     * 清除一条预算。**「没设预算」与「预算为 0」不是一回事**，
+     * 所以清除走 DELETE 而不是写一个 0——留着一行 0 会让界面显示一条点不动的预算，
+     * 而 `BudgetLevel.UNSET` 也判不出来。
+     */
+    @Query("DELETE FROM budget WHERE categoryId = :categoryId")
+    suspend fun deleteByCategory(categoryId: String)
+
+    @Query("SELECT * FROM budget ORDER BY categoryId")
+    fun observeAll(): Flow<List<BudgetEntity>>
+}
+
 /**
  * 某个分类在区间内的合计。**聚合在 SQL 里做**，不要把整本账目拉进内存再用 Kotlin 过滤——
  * 账本会随时间增长，而 `observeEntries()` 每次变动都会重发全表。
@@ -314,6 +332,32 @@ interface PostingDao {
         fromEpochDay: Long,
         toEpochDay: Long,
     ): Flow<List<CategoryTotal>>
+
+    /**
+     * **某一个分类**在区间内已花的金额。
+     *
+     * 与 [observeCategoryTotals] 的区别只在粒度：那个一次给全部分类（预算页/报表页要的），
+     * 这个只给一个（记账后即时问一句「这笔会让餐饮超预算吗」）。
+     * 拿全部再在内存里 find 也行，但那要连带把其余分类的合计也读出来，白读。
+     *
+     * 没有记录时返回 0 而不是 null——「这个月还没在餐饮上花过钱」是确切的事实，
+     * 不是「不知道」。
+     */
+    @Query(
+        """
+        SELECT COALESCE(SUM(p.amountMinor), 0)
+        FROM posting p
+        JOIN journal j ON j.id = p.journalId
+        WHERE p.accountId = :categoryId
+          AND j.status != 'VOID'
+          AND j.dateEpochDay BETWEEN :fromEpochDay AND :toEpochDay
+        """,
+    )
+    fun observeCategorySpent(
+        categoryId: String,
+        fromEpochDay: Long,
+        toEpochDay: Long,
+    ): Flow<Long>
 
     /**
      * 按月分组的收支合计，用于趋势柱状图。

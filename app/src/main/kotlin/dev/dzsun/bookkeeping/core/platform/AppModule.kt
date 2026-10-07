@@ -24,7 +24,11 @@ object AppModule {
     @Singleton
     fun provideLedgerDatabase(@ApplicationContext context: Context): LedgerDatabase =
         Room.databaseBuilder(context, LedgerDatabase::class.java, "ledger.db")
-            .addMigrations(LedgerDatabase.MIGRATION_1_2, LedgerDatabase.MIGRATION_2_3)
+            .addMigrations(
+                LedgerDatabase.MIGRATION_1_2,
+                LedgerDatabase.MIGRATION_2_3,
+                LedgerDatabase.MIGRATION_3_4,
+            )
             .build()
 
     @Provides

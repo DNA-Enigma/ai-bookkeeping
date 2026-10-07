@@ -229,3 +229,24 @@ data class JournalItemEntity(
     val amountMinor: Long? = null,
     val sortOrder: Int = 0,
 )
+
+/**
+ * 某个分类的**月度上限**（「餐饮每月 ≤ 1100」）。
+ *
+ * **一个分类一行**，主键就是分类 id：预算是经常性的额度，不是逐月实例——
+ * 后者要为每个月建一行，用户没设过的月份还得回退到某个默认值，
+ * 平白多出一层「哪一份才算数」的含义。真要做成按月不同时，再加 `month` 列、
+ * 主键改 `(categoryId, month)`，那是一次显式的迁移。
+ *
+ * **不加外键指向 `account`。** 分类是数据不是代码，用户删/归档分类后这条预算还该留着——
+ * `CASCADE` 会**静默**把预算删掉（用户既看不到也删不掉它），`RESTRICT` 又会挡住分类操作，
+ * 两者都不是想要的。界面按 id 兜底显示，让用户自己决定怎么处理。
+ *
+ * 金额是钱，一律整数最小单位，与账本其余部分同一口径。
+ */
+@Entity(tableName = "budget")
+data class BudgetEntity(
+    @PrimaryKey val categoryId: String,
+    val amountMinor: Long,
+    val updatedAt: Long,
+)

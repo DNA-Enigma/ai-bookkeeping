@@ -14,3 +14,7 @@ captures/
 
 # Kotlin 2.x 构建缓存
 .kotlin/
+
+# tools/ 下 Python 校验脚本的字节码缓存
+__pycache__/
+*.pyc

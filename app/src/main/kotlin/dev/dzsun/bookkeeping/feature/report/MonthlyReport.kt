@@ -1,30 +1,9 @@
 package dev.dzsun.bookkeeping.feature.report
 
-import dev.dzsun.bookkeeping.core.database.CategoryTotal
+import dev.dzsun.bookkeeping.core.ledger.CategoryBudget
+import dev.dzsun.bookkeeping.core.ledger.MonthAggregate
 import java.time.LocalDate
 import java.time.YearMonth
-
-/**
- * 一个月的原始聚合。**报表页的数据入口**，由 [MonthlyReportSource] 产出。
- *
- * 这里只放"查出来的数"，不放任何展示口径（占比、日均、环比都在
- * [MonthlyReportCalculator] 里算）——查与算是两件事，混在一起就没法只测其中一件。
- *
- * [currency] 为 null 表示科目表还没读出来。**币种未知时不允许构造 [MonthlyReport]**，
- * 因为 `Money` 拒绝空币种，界面不该有机会踩到它。
- */
-data class MonthAggregate(
-    val yearMonth: YearMonth,
-    val currency: String?,
-    /** 收入，正数。 */
-    val incomeMinor: Long,
-    /** 支出，正数。 */
-    val expenseMinor: Long,
-    /** 支出侧分类合计。约定按金额降序，但 [MonthlyReportCalculator] 会自己再排一次。 */
-    val categories: List<CategoryTotal>,
-    /** 上月支出，用于环比。0 表示上月没有支出。 */
-    val previousExpenseMinor: Long,
-)
 
 /**
  * 报表里的一个分类。

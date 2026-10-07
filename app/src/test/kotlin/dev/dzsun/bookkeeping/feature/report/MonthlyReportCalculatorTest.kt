@@ -1,6 +1,8 @@
 package dev.dzsun.bookkeeping.feature.report
 
 import dev.dzsun.bookkeeping.core.database.CategoryTotal
+import dev.dzsun.bookkeeping.core.ledger.CategoryBudget
+import dev.dzsun.bookkeeping.core.ledger.MonthAggregate
 import java.time.LocalDate
 import java.time.YearMonth
 import org.junit.Assert.assertEquals
