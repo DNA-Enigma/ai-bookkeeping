@@ -21,6 +21,7 @@ import dev.dzsun.bookkeeping.core.network.MediaPayload
 import dev.dzsun.bookkeeping.core.network.PendingClarification
 import dev.dzsun.bookkeeping.core.network.ReceiptFields
 import dev.dzsun.bookkeeping.core.network.TaskFeedback
+import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.core.platform.Clock
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -269,7 +270,9 @@ class AddEntryViewModel @Inject constructor(
         val outcome = runCatching { captureClient.capture(request) }
             .getOrElse { error ->
                 if (!offlineFallback) {
-                    _state.update { it.copy(isParsing = false, parseError = error.message ?: "识别失败") }
+                    // error.message 可能是「连不上 <baseUrl><path>」这类带地址的原文，
+                    // 界面只认白名单文案（见 UserFacingErrors）。
+                    _state.update { it.copy(isParsing = false, parseError = UserFacingErrors.userMessageFor(error)) }
                     return
                 }
                 parseOffline(request.text.orEmpty(), today, current)
@@ -320,7 +323,8 @@ class AddEntryViewModel @Inject constructor(
                     expenseCategories = current.expenseCategories,
                     incomeCategories = current.incomeCategories,
                 )
-                val message = outcome.problem?.detail ?: outcome.problem?.title ?: "识别失败"
+                // problem.detail 是服务端原文（可能含上游 JSON / 路由名），不进界面。
+                val message = UserFacingErrors.CAPTURE
                 if (partial != null) {
                     applyCards(listOf(partial), taskId = outcome.taskId, clarification = null, error = message)
                 } else {
@@ -501,8 +505,9 @@ class AddEntryViewModel @Inject constructor(
                     }
                 },
                 onFailure = { error ->
+                    // error.message 可能带着库层原文，界面只给白名单文案。
                     _state.update {
-                        it.copy(isSaving = false, parseError = error.message ?: "入账失败")
+                        it.copy(isSaving = false, parseError = UserFacingErrors.SAVE)
                     }
                 },
             )
@@ -547,12 +552,13 @@ class AddEntryViewModel @Inject constructor(
                     )
                 }
             },
-            onFailure = { error ->
+            onFailure = {
+                // 不拼 error.message：它可能带库层/网络原文。用户要做的只是核对后重试。
                 applyCards(
                     listOf(card),
                     taskId = taskId,
                     clarification = null,
-                    error = "自动入账没成功，请核对后重试：${error.message}",
+                    error = "自动入账没成功，请核对后重试",
                 )
             },
         )

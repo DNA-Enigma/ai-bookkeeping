@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -28,15 +29,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dzsun.bookkeeping.core.designsystem.*
 import dev.dzsun.bookkeeping.feature.home.HomeModulesState
+import dev.dzsun.bookkeeping.feature.ledger.minorToYuanInput
 
 /**
  * ============================================================
@@ -74,7 +78,7 @@ fun SettingsScreen(
         AssistantBlock()
         Spacer(Modifier.height(40.dp))
         SectionHeader(4, "账本")
-        LedgerSection(state, onImportClick)
+        LedgerSection(state, onImportClick, viewModel::onBudgetYuanChange)
         Spacer(Modifier.height(40.dp))
         SectionHeader(5, "自动化")
         AutomationSection(state, viewModel)
@@ -167,7 +171,8 @@ private fun ModuleToggles() {
         ToggleRow("主动建议", "管家每日 3 则以内的洞察", HomeModulesState.insights) { HomeModulesState.insights = it }
         ToggleRow("本月总览", "收支数字与预算执行", HomeModulesState.overview) { HomeModulesState.overview = it }
         ToggleRow("近期流水", "最近 5 笔账目", HomeModulesState.transactions) { HomeModulesState.transactions = it }
-        ToggleRow("财务体质", "四维度健康评分", HomeModulesState.health) { HomeModulesState.health = it }
+        // 「财务体质」暂时不给开关：评分模型没接入，首页一律不渲染那个模块，
+        // 让用户开关一个看不见的东西只会造成困惑。模型落地后与其它行一并恢复。
     }
 }
 
@@ -218,11 +223,16 @@ private fun AssistantBlock() {
 /* ---------------- 账本（原功能：币种/类目/导入） ---------------- */
 
 @Composable
-private fun LedgerSection(state: SettingsUiState, onImportClick: () -> Unit) {
+private fun LedgerSection(
+    state: SettingsUiState,
+    onImportClick: () -> Unit,
+    onBudgetYuanChange: (String) -> Unit,
+) {
     val p = Art.colors
     InfoRow("本位币", state.currency)
     InfoRow("支出类目", "${state.expenseCategories.size} 个")
     InfoRow("账户", "${state.accounts.size} 个")
+    BudgetRow(state, onBudgetYuanChange)
     Column {
         Row(Modifier.fillMaxWidth().padding(vertical = 17.dp),
             horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -233,6 +243,58 @@ private fun LedgerSection(state: SettingsUiState, onImportClick: () -> Unit) {
             }
             Text("前往 →", style = TextStyle(fontSize = 12.5.sp, letterSpacing = 1.sp), color = p.accent,
                 modifier = Modifier.clickable(onClick = onImportClick))
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
+    }
+}
+
+/**
+ * 月度预算。单位元、内部存分（[yuanToMinor] 整数换算，不碰浮点）。
+ * 留空 = 不设预算，首页预算行会显示引导文案而不是 0/100%。
+ */
+@Composable
+private fun BudgetRow(state: SettingsUiState, onBudgetYuanChange: (String) -> Unit) {
+    val p = Art.colors
+    var text by remember { mutableStateOf(minorToYuanInput(state.budgetMinor)) }
+    Column {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 17.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("月度预算", style = TextStyle(fontSize = 14.5.sp, fontWeight = FontWeight.Medium, fontFamily = Art.type.body), color = p.ink)
+                Spacer(Modifier.height(3.dp))
+                Text("设定每月开支上限，留空表示不设", style = TextStyle(fontSize = 12.sp, fontFamily = Art.type.body), color = p.ink3)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                BasicTextField(
+                    value = text,
+                    onValueChange = { next ->
+                        text = next
+                        // 认不出的输入不写、不清——留着让用户改，不要静默改值
+                        onBudgetYuanChange(next)
+                    },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        fontFamily = Art.type.num, fontWeight = Art.type.numWeight,
+                        fontSize = 15.sp, fontFeatureSettings = "tnum",
+                        color = p.ink, textAlign = TextAlign.End,
+                    ),
+                    cursorBrush = SolidColor(p.accent),
+                    modifier = Modifier.width(96.dp),
+                    decorationBox = { inner ->
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                            if (text.isEmpty()) {
+                                Text("不设", style = TextStyle(fontSize = 13.5.sp, fontFamily = Art.type.body), color = p.ink3)
+                            }
+                            inner()
+                        }
+                    },
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("元", style = TextStyle(fontSize = 12.sp, fontFamily = Art.type.body), color = p.ink3)
+            }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
     }
@@ -293,7 +355,8 @@ private fun AboutSection(state: SettingsUiState, viewModel: SettingsViewModel, o
                         is UpdateUiState.UpToDate -> "已是最新版本"
                         is UpdateUiState.Available -> "发现新版本，可下载安装"
                         is UpdateUiState.Downloading -> "下载中……"
-                        is UpdateUiState.Error -> "检查失败：${u.reason}"
+                        // u.reason 可能含主机名/URL，界面只给白名单文案。
+                        is UpdateUiState.Error -> "网络不通，稍后再试"
                         else -> "手动检查新版本"
                     },
                     style = TextStyle(fontSize = 12.sp, fontFamily = Art.type.body),

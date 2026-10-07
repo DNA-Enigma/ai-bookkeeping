@@ -15,7 +15,7 @@ import javax.inject.Singleton
  * ## 为什么需要它，以及它为什么是降级的
  *
  * 问账的正路是调度层判定（`bookkeeping.ledger.query`）→ 下发结构化查询 → 本机算。
- * 但调度层**当前产不出这个结构**：`query_ledger` 读的是它自己的 `LedgerPort`
+ * 但调度层**当前产不出这个结构**：那个账目查询工具读的是它自己的 `LedgerPort`
  * （参考实现是进程内的内存账本），实测恒返回 `{"entries": [], "count": 0}`，
  * 于是 `LedgerQueryClient` 每次都落进 `Unavailable`。也就是说这条意图在契约补齐前
  * **一句话也答不出来**。

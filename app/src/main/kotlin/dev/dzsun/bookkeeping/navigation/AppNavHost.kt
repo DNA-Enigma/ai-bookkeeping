@@ -124,6 +124,8 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
                     HomeScreen(
                         onOpenChat = { navController.navigate(Routes.CHAT) },
                         onEntryClick = { id -> navController.navigate(Routes.entryDetail(id)) },
+                        onAddEntry = { showAddSheet = true },
+                        onImportClick = { navController.navigate(Routes.IMPORT) },
                     )
                 }
                 composable(Routes.REPORT) { ReportScreen() }

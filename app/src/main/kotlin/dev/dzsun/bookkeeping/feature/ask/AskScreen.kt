@@ -75,7 +75,7 @@ fun AskScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(
-                "用一句话问账本。判定交给调度层，算术在本机做——账目不出设备。",
+                "用一句话问账本。判定交给 AI 服务，算术在本机做——账目不出设备。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -195,9 +195,9 @@ private fun AnswerCard(answer: AskAnswer) {
 /**
  * 答不了的时候说清楚**为什么**。
  *
- * 这里的三种原因（调度层没起、契约缺能力、科目表没建好）用户一件也改不了，
- * 所以既不显示「重试」也不显示「失败」，只把原因原样摆出来——
- * 契约缺能力那条还会由 `LedgerQueryClient` 写明「服务端查的是它自己的空账本」。
+ * 这里的三种原因（服务端没起、契约缺能力、科目表没建好）用户一件也改不了，
+ * 所以既不显示「重试」也不显示「失败」，只把白名单文案摆出来——
+ * 服务端的内部原因（工具名、账本归属）不会走到界面。
  */
 @Composable
 private fun UnavailableCard(stage: AskStage.Unavailable) {

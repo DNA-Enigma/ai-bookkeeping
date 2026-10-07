@@ -18,11 +18,11 @@ import kotlinx.serialization.json.JsonObject
  * ```
  * POST /v1/tasks {"input":{"text":"这个月花了多少"},
  *                 "declared":{"intent":"bookkeeping.ledger.query"}}
- * → route_id: single_tool_action, tool_set: ["query_ledger"], max_llm_calls: 0
+ * → route_id: single_tool_action, tool_set: ["账目查询工具"], max_llm_calls: 0
  * → result.main = {"entries": [], "count": 0}
  * ```
  *
- * `query_ledger` 读的是服务端自己的 `LedgerPort`（`handlers/bookkeeping/ports.py`，
+ * 那个账目查询工具读的是服务端自己的 `LedgerPort`（`handlers/bookkeeping/ports.py`，
  * 参考实现是进程内的 `InMemoryLedger`），所以它**恒等于空**——不管用户这个月花了多少。
  * 后端的工具注释自己也写明了：「账本在消费端的本地库里，后端的工具不可能写进用户手机的数据库」。
  * 读和写是同一个道理。
@@ -34,7 +34,7 @@ import kotlinx.serialization.json.JsonObject
  * ## 契约状态
  *
  * ⚠️ **这个形状目前是客户端单方面定义的，调度层还没有实现它**（`schemas/` 下没有
- * 对应文件，`handler.yaml` 里 `query_ledger` 既没有 `input_schema` 也没声明产出形状）。
+ * 对应文件，`handler.yaml` 里那个账目查询工具既没有 `input_schema` 也没声明产出形状）。
  * 见 `docs/dispatcher-issues.md` 的 P1-a 条。客户端已经按它实现完毕，
  * 后端落地后**不需要改界面**。
  */
@@ -116,14 +116,14 @@ data class LedgerQuerySpec(
  * 一次问账的结局。
  *
  * [Unavailable] 不是异常，是**当前调度层的真实状态**——它把问题路由对了
- * （`single_tool_action` + `query_ledger`），但产不出可执行的查询。
+ * （`single_tool_action` + 账目查询工具），但产不出可执行的查询。
  * 界面据此如实说明，而不是编一个数出来。这与 `AutoEntryUndo` 的处理同一个道理：
  * **没有能力就不渲染按钮**，显示一个点不动的撤销键比不显示更糟。
  */
 sealed interface LedgerQueryOutcome {
     val taskId: String?
 
-    /** 调度层把问题翻译成了一次查询，可以在本地执行了。 */
+    /** 把问题翻译成了一次查询，可以在本地执行了。 */
     data class Interpreted(
         override val taskId: String,
         val query: LedgerQuery,

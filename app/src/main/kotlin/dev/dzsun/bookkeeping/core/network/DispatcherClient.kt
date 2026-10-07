@@ -211,7 +211,9 @@ class DispatcherClient @Inject constructor(
         val connection = try {
             open(method, path, headers, readTimeoutMs = REQUEST_READ_TIMEOUT_MS)
         } catch (e: IOException) {
-            throw DispatcherException(null, "无法连接 ${config.baseUrl}$path", e)
+            // 原始信息是「无法连接 <baseUrl><path>」——它带着服务端地址与路由，
+            // **不进界面**（见 UserFacingErrors）。排查靠 cause 里的 IOException。
+            throw DispatcherException(null, UserFacingErrors.UNREACHABLE, e)
         }
         try {
             if (body != null) {

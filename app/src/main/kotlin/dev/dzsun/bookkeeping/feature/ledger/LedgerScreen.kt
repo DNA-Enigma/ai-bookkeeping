@@ -207,39 +207,48 @@ private fun SummaryCard(
             }
         }
         Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            if (state.budgetMinor <= 0L) {
+                // 没设预算：不显示「剩余 0 / 已用 0%」，也不出现超支字样。
                 Text(
-                    "月预算剩余 ${if (hideAmounts) "****" else Money.of(state.budgetRemainingMinor, currency).toPlainString()}",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Icon(
-                    Icons.Default.Edit,
-                    contentDescription = "编辑预算",
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "已用 ${(state.budgetUsedFraction * 100).toInt()}%",
+                    "未设月预算 · 去设置里定一个",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-            Spacer(Modifier.height(8.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(8.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(CreamTrack),
-            ) {
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "月预算剩余 ${if (hideAmounts) "****" else Money.of(state.budgetRemainingMinor, currency).toPlainString()}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = "编辑预算",
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "已用 ${(state.budgetUsedFraction * 100).toInt()}%",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(state.budgetUsedFraction.coerceAtLeast(0.06f))
+                        .fillMaxWidth()
                         .height(8.dp)
                         .clip(RoundedCornerShape(4.dp))
-                        .background(CreamFill),
-                )
+                        .background(CreamTrack),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(state.budgetUsedFraction.coerceAtLeast(0.06f))
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(CreamFill),
+                    )
+                }
             }
         }
     }

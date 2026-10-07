@@ -76,12 +76,13 @@ class DispatcherMerchantCategorizer @Inject constructor(
 
         val snapshot = awaitTerminal(accepted)
         if (snapshot?.status != TaskSnapshot.STATUS_SUCCEEDED) {
-            return MerchantCategorization.Unavailable(snapshot?.error?.detail ?: "调度层没能完成归类")
+            // snapshot.error.detail 是服务端原文，可能带主机名/上游报错——不进界面。
+            return MerchantCategorization.Unavailable(UserFacingErrors.CLASSIFY)
         }
 
         val parsed = parseMerchantCategories(client.getResult(accepted.taskId))
         if (parsed.isEmpty()) {
-            return MerchantCategorization.Unavailable("调度层没有给出归类建议")
+            return MerchantCategorization.Unavailable(UserFacingErrors.CLASSIFY)
         }
         MerchantCategorization.Suggested(
             merchants.map { merchant ->
@@ -98,8 +99,9 @@ class DispatcherMerchantCategorizer @Inject constructor(
         throw e
     } catch (e: Exception) {
         // 连不上、契约缺能力、回包解不出来——对界面都是同一件事：**这次拿不到建议**，
-        // 用户手工挑分类即可，不该弹一个他无能为力的错误框
-        MerchantCategorization.Unavailable(e.message ?: "调度层不可用")
+        // 用户手工挑分类即可，不该弹一个他无能为力的错误框。
+        // e.message 可能带着地址或上游错误体，只给白名单文案。
+        MerchantCategorization.Unavailable(UserFacingErrors.CLASSIFY)
     }
 
     /**

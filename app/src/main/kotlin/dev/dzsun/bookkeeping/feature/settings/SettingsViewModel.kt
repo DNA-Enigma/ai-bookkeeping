@@ -12,7 +12,10 @@ import dev.dzsun.bookkeeping.core.update.ApkInstaller
 import dev.dzsun.bookkeeping.core.update.UpdateChecker
 import dev.dzsun.bookkeeping.core.update.UpdateManifest
 import dev.dzsun.bookkeeping.core.update.UpdateStatus
+import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.feature.entry.AutoConfirmSettings
+import dev.dzsun.bookkeeping.feature.ledger.MonthlyBudgetStore
+import dev.dzsun.bookkeeping.feature.ledger.yuanToMinor
 import kotlinx.coroutines.flow.update
 import java.io.File
 import javax.inject.Inject
@@ -50,6 +53,8 @@ data class SettingsUiState(
     /** 可调范围，来自数据层的 assets 配置。 */
     val autoConfirmRange: ClosedFloatingPointRange<Float> =
         ConfidenceGate.MIN_THRESHOLD..ConfidenceGate.MAX_THRESHOLD,
+    /** 月预算（最小单位）。0 = 不设。真源是 [MonthlyBudgetStore]。 */
+    val budgetMinor: Long = 0L,
 )
 
 @HiltViewModel
@@ -58,6 +63,7 @@ class SettingsViewModel @Inject constructor(
     private val updateChecker: UpdateChecker,
     private val apkInstaller: ApkInstaller,
     private val autoConfirmSettings: AutoConfirmSettings,
+    private val monthlyBudgetStore: MonthlyBudgetStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -73,6 +79,11 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             autoConfirmSettings.threshold.collect { value ->
                 _state.update { it.copy(autoConfirmThreshold = value) }
+            }
+        }
+        viewModelScope.launch {
+            monthlyBudgetStore.budgetMinor.collect { value ->
+                _state.update { it.copy(budgetMinor = value) }
             }
         }
         viewModelScope.launch {
@@ -102,6 +113,15 @@ class SettingsViewModel @Inject constructor(
      */
     fun onAutoConfirmThresholdChange(value: Float) = autoConfirmSettings.setThreshold(value)
 
+    /**
+     * 改月预算。**立即生效**：写的是 [MonthlyBudgetStore] 这个单例，
+     * 首页读的是同一个源。认不出的输入不写、不清，由界面自己留着让用户改。
+     */
+    fun onBudgetYuanChange(text: String) {
+        val minor = yuanToMinor(text) ?: return
+        monthlyBudgetStore.setBudgetMinor(minor)
+    }
+
     fun checkForUpdate() {
         if (_state.value.update is UpdateUiState.Checking) return
         _state.update { it.copy(update = UpdateUiState.Checking) }
@@ -109,7 +129,10 @@ class SettingsViewModel @Inject constructor(
             when (val status = updateChecker.check(state.value.versionCode, state.value.versionName)) {
                 is UpdateStatus.UpToDate -> _state.update { it.copy(update = UpdateUiState.UpToDate) }
                 is UpdateStatus.Available -> _state.update { it.copy(update = UpdateUiState.Available(status.manifest)) }
-                is UpdateStatus.Failed -> _state.update { it.copy(update = UpdateUiState.Error(status.reason)) }
+                is UpdateStatus.Failed -> _state.update {
+                    // status.reason 可能带主机名/URL（见 UserFacingErrors），不透传。
+                    it.copy(update = UpdateUiState.Error(UserFacingErrors.UPDATE))
+                }
             }
         }
     }
@@ -143,8 +166,9 @@ class SettingsViewModel @Inject constructor(
                     }
                 },
                 onFailure = { error ->
+                    // error.message 可能带 URL/主机名，界面只给白名单文案。
                     _state.update {
-                        it.copy(update = UpdateUiState.Error(error.message ?: "下载失败"))
+                        it.copy(update = UpdateUiState.Error(UserFacingErrors.UPDATE))
                     }
                 },
             )

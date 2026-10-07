@@ -28,12 +28,15 @@ data class LedgerUiState(
     val monthIncomeMinor: Long = 0L,
     val todayExpenseMinor: Long = 0L,
     val isLoading: Boolean = true,
+    /**
+     * 月预算（最小单位）。**0 = 用户没设**，此时界面展示引导文案而不是 0/100%。
+     * 真源是 [MonthlyBudgetStore]（SharedPreferences），由 ViewModel 合成进本状态。
+     */
+    val budgetMinor: Long = 0L,
 ) {
     val balanceMinor: Long get() = monthIncomeMinor - monthExpenseMinor
 
-    /** 月预算（最小单位）。目前本地固定，后续接设置/服务端。 */
-    val budgetMinor: Long get() = 1_200_00L
-
+    /** 没设预算时没有「用掉几成」这回事，返回 0；界面应据此走引导态而非进度条。 */
     val budgetUsedFraction: Float
         get() = if (budgetMinor <= 0L) 0f else (monthExpenseMinor.toFloat() / budgetMinor).coerceIn(0f, 1f)
 
@@ -44,6 +47,7 @@ data class LedgerUiState(
 @HiltViewModel
 class LedgerViewModel @Inject constructor(
     private val repository: LedgerRepository,
+    private val budgetStore: MonthlyBudgetStore,
     clock: Clock,
 ) : ViewModel() {
 
@@ -70,7 +74,8 @@ class LedgerViewModel @Inject constructor(
                     repository.observeTotal(AccountType.EXPENSE, currency, monthStart, monthEnd),
                     repository.observeTotal(AccountType.INCOME, currency, monthStart, monthEnd),
                     repository.observeTotal(AccountType.EXPENSE, currency, today, today),
-                ) { entries, expense, income, todayExpense ->
+                    budgetStore.budgetMinor,
+                ) { entries, expense, income, todayExpense, budget ->
                     LedgerUiState(
                         monthLabel = monthLabel,
                         currency = currency,
@@ -80,6 +85,7 @@ class LedgerViewModel @Inject constructor(
                         monthIncomeMinor = -income,
                         todayExpenseMinor = todayExpense,
                         isLoading = false,
+                        budgetMinor = budget,
                     )
                 }
             }

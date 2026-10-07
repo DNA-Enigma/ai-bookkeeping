@@ -99,7 +99,8 @@ class AuthViewModel @Inject constructor(
         viewModelScope.launch {
             when (val result = repository.sendResetCode(email)) {
                 is AuthResult.Success -> _state.update {
-                    it.copy(isLoading = false, notice = "重置说明已发到 $email（演示环境不真发信）")
+                    // 固定文案：不回显邮箱，也不透露这封信是否真的发出（见 UserFacingErrors）。
+                    it.copy(isLoading = false, notice = "重置说明已发送，没收到请检查垃圾邮件")
                 }
 
                 is AuthResult.Failed -> _state.update {

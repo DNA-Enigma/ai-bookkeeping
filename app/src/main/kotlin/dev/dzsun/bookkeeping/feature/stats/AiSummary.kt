@@ -12,6 +12,7 @@ import dev.dzsun.bookkeeping.core.network.TaskAccepted
 import dev.dzsun.bookkeeping.core.network.TaskEnvelope
 import dev.dzsun.bookkeeping.core.network.TaskInput
 import dev.dzsun.bookkeeping.core.network.TaskSnapshot
+import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.core.network.nestedObjects
 import dev.dzsun.bookkeeping.core.platform.IdGenerator
 import java.time.LocalDate
@@ -193,7 +194,7 @@ class DispatcherAiSummarySource @Inject constructor(
                 // 数字是我们自己塞进 prompt 的。`chat.explain` 的词表描述
                 // （「总结，不需要用户私有数据」）正对应这个形状，实测也稳定
                 // 落到 direct_answer；换成 bookkeeping.report 则会被路由到
-                // single_tool_action 的 query_ledger，拿回一个空账本而不是一段话。
+                // single_tool_action 的账目查询工具，拿回一个空结果而不是一段话。
                 declared = Declared(intent = INTENT_SUMMARY, authoritative = true),
                 // 声明 financial 是如实的（prompt 里确实带着用户的收支数字），
                 // 而实测这条声明不影响它落到直达路径。
@@ -216,7 +217,7 @@ class DispatcherAiSummarySource @Inject constructor(
     } catch (e: Exception) {
         // 连不上、超时、回包解不出来——对界面都是同一件事：这次拿不到 AI 分析，
         // 退回本地模板即可，不该弹一个用户无能为力的错误框
-        AiSummaryOutcome.Unavailable(e.message ?: "调度层不可用")
+        AiSummaryOutcome.Unavailable(UserFacingErrors.GENERIC)
     }
 
     /**
@@ -266,12 +267,11 @@ class DispatcherAiSummarySource @Inject constructor(
  */
 internal fun summaryOutcomeOf(taskId: String, snapshot: TaskSnapshot?): AiSummaryOutcome {
     if (snapshot == null) {
-        return AiSummaryOutcome.Unavailable("任务已经提交，但读不到它的状态——多半是网络断了")
+        return AiSummaryOutcome.Unavailable(UserFacingErrors.UNREACHABLE)
     }
     if (snapshot.status != TaskSnapshot.STATUS_SUCCEEDED) {
-        return AiSummaryOutcome.Unavailable(
-            snapshot.error?.detail ?: snapshot.error?.title ?: "任务停在「${snapshot.status}」",
-        )
+        // error.detail / title / status 是服务端内部词，不进界面。
+        return AiSummaryOutcome.Unavailable(UserFacingErrors.GENERIC)
     }
     val answer = parseSummaryAnswer(snapshot.artifacts)
         ?: return AiSummaryOutcome.Unavailable("任务成功了，但产物里没有可读的小结")

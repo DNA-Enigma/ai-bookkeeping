@@ -127,7 +127,8 @@ fun ChatScreen(
             }
             is AskStage.Unavailable -> {
                 typing = false
-                messages += ChatMsg.Text(true, "这句我暂时答不了：${s.reason}\n\n可以换个问法，比如「这个月餐饮花了多少」。")
+                // s.reason 已是白名单文案（见 UserFacingErrors），不透传服务端原文。
+                messages += ChatMsg.Text(true, "${s.reason}\n\n可以换个问法，比如「这个月餐饮花了多少」。")
                 scroll()
             }
             else -> {}

@@ -818,7 +818,7 @@ private fun ClassificationSection(
         ) {
             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(12.dp))
-            Text("正在让调度层归类…", style = MaterialTheme.typography.bodyMedium)
+            Text("正在让 AI 服务归类…", style = MaterialTheme.typography.bodyMedium)
         }
 
         else -> Unit

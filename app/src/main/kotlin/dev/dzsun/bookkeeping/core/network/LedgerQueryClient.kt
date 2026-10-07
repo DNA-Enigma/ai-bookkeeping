@@ -57,8 +57,9 @@ class LedgerQueryClient @Inject constructor(
                 outcomeOf(accepted.taskId, snapshot)
             }
         } catch (e: DispatcherException) {
-            // 还没拿到 task_id 就断了（提交这一步就失败），所以第一个参数为 null
-            LedgerQueryOutcome.Unavailable(null, e.problem, e.message ?: e.code)
+            // 还没拿到 task_id 就断了（提交这一步就失败）。
+            // e.message 可能带着服务端 detail / 地址，界面只看白名单文案。
+            LedgerQueryOutcome.Unavailable(null, e.problem, UserFacingErrors.ASK)
         }
     }
 
@@ -67,28 +68,30 @@ class LedgerQueryClient @Inject constructor(
             return LedgerQueryOutcome.Unavailable(
                 taskId,
                 null,
-                "任务已经提交，但读不到它的状态——多半是网络断了",
+                UserFacingErrors.UNREACHABLE,
             )
         }
 
         if (snapshot.status != TaskSnapshot.STATUS_SUCCEEDED) {
+            // 停在非成功终态：error.title / status 都是服务端内部词，不进界面。
             return LedgerQueryOutcome.Unavailable(
                 taskId,
                 snapshot.error,
-                snapshot.error?.title ?: "任务停在「${snapshot.status}」",
+                UserFacingErrors.ASK,
             )
         }
 
-        // 成功但产不出查询——**这是当前调度层的常态，不是异常**。
-        // `query_ledger` 读的是服务端的 LedgerPort（参考实现是内存的），
-        // 所以它返回的永远是空账本，而不是一句可执行的查询。
-        // 这里如实说出来，绝不拿一个空结果冒充「你这个月花了 0 元」。
+        // 成功但产不出查询——**这是当前服务端的常态，不是异常**。
+        // 那条工具读的是服务端自己的参考账本（内存实现），返回的永远是空结果，
+        // 而不是一句可执行的查询。这里如实说出来，绝不拿空结果冒充「你这个月花了 0 元」。
+        //
+        // 原因详情（工具名、账本归属）只活在本注释里，**不进界面**：
+        // 用户改不了这些，界面只需要告诉他「换个问法」（见 UserFacingErrors.ASK）。
         val query = snapshot.artifacts.ledgerQuerySpec()?.toQuery()
             ?: return LedgerQueryOutcome.Unavailable(
                 taskId,
                 null,
-                "调度层把问题路由到了 query_ledger，但没有下发可执行的查询结构" +
-                    "（它查的是服务端自己的空账本，看不到手机上的账目）",
+                UserFacingErrors.ASK,
             )
 
         return LedgerQueryOutcome.Interpreted(taskId, query)

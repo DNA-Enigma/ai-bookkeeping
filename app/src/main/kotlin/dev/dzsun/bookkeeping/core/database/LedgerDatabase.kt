@@ -84,7 +84,7 @@ abstract class LedgerDatabase : RoomDatabase() {
         /**
          * v2 → v3：冲减的溯源列（退款/撤销冲的是哪一笔）。
          *
-         * 同样是加列而非改列，**不用破坏性迁移**——那会清空账本。
+         * 同样是加列而非改列，**不用破坏性迁移**——那会清掉全部账目。
          * 老账目的该列为 NULL，含义正是「不是冲减」，与旧数据相符。
          */
         val MIGRATION_2_3: Migration = object : Migration(2, 3) {

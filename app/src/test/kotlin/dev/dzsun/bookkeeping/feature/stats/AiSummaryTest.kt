@@ -2,6 +2,7 @@ package dev.dzsun.bookkeeping.feature.stats
 
 import dev.dzsun.bookkeeping.core.network.Problem
 import dev.dzsun.bookkeeping.core.network.TaskSnapshot
+import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import java.time.LocalDate
 import java.time.YearMonth
 import kotlinx.serialization.json.Json
@@ -151,11 +152,13 @@ class AiSummaryTest {
     }
 
     @Test
-    fun `任务失败时走降级并带上服务端的原因`() {
-        val outcome = summaryOutcomeOf("task_2", snapshot("failed", null, detail = "上游超时"))
+    fun `任务失败时走降级且不透传服务端原因`() {
+        // 服务端 detail（这里故意写成带主机名风格的原文）**不进界面**：
+        // 用户改不了它，排查信息只活在异常对象里。见 UserFacingErrors。
+        val outcome = summaryOutcomeOf("task_2", snapshot("failed", null, detail = "upstream.timeout at gateway.internal"))
 
         assertTrue(outcome is AiSummaryOutcome.Unavailable)
-        assertEquals("上游超时", (outcome as AiSummaryOutcome.Unavailable).detail)
+        assertEquals(UserFacingErrors.GENERIC, (outcome as AiSummaryOutcome.Unavailable).detail)
     }
 
     @Test

@@ -8,6 +8,7 @@ import dev.dzsun.bookkeeping.core.ledger.LedgerQueryRunner
 import dev.dzsun.bookkeeping.core.ledger.LocalQueryTranslator
 import dev.dzsun.bookkeeping.core.network.LedgerQueryClient
 import dev.dzsun.bookkeeping.core.network.LedgerQueryOutcome
+import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.core.platform.Clock
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -55,8 +56,8 @@ data class AskUiState(
  * ## 调度层翻不出来的时候
  *
  * 退到 [LocalQueryTranslator]——**这是降级，不是第二套主路径**。它的存在理由是
- * 调度层当前根本产不出查询结构（`query_ledger` 查的是它自己的空账本，
- * 见 `LedgerQueryClient` 的说明），于是这条意图在契约补齐前一句话也答不出来。
+ * 调度层当前根本产不出查询结构（那个账目查询工具读的是服务端自己的参考数据，
+ * 返回的永远是空结果），于是这条意图在契约补齐前一句话也答不出来。
  *
  * 两点必须说清：
  * - **只在前者给不出查询时启用**（`Unavailable`），调度层一旦给出结构就用它的；
@@ -96,13 +97,12 @@ class AskViewModel @Inject constructor(
             return answer(question, outcome.query, local = false)
         }
 
-        // 调度层给不出查询结构时退到本地词法翻译。翻得出来就照常作答，
-        // 翻不出来才说「答不了」——原因用调度层给的那条，它更接近实情。
+        // 服务端给不出查询结构时退到本地词法翻译。翻得出来就照常作答，
+        // 翻不出来才说「答不了」——原因用白名单文案，不透传服务端 detail。
         val local = translator.translate(question, clock.today())
             ?: return AskStage.Unavailable(
                 question,
-                (outcome as LedgerQueryOutcome.Unavailable).detail +
-                    "；本地也没能从这句话里认出时间、收支方向或商户",
+                UserFacingErrors.ASK,
             )
 
         return answer(question, local, local = true)
@@ -125,6 +125,6 @@ class AskViewModel @Inject constructor(
     }
 
     private companion object {
-        const val LOCAL_NOTE = "这句话是按本地规则理解的，没有经过调度层"
+        const val LOCAL_NOTE = "这句话是按本地规则理解的，没有经过 AI 服务"
     }
 }
