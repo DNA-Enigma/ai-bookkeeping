@@ -167,7 +167,7 @@ data class ArtType(
     val greetingItalic: Boolean     // 杂志/暗夜：问候名用斜体；禅意/极简：用强调色
 )
 
-private fun ArtStyle.type(): ArtType = when (this) {
+fun ArtStyle.type(): ArtType = when (this) {
     ArtStyle.ZEN -> ArtType(ArtFonts.NotoSerifSC, ArtFonts.NotoSerifSC, ArtFonts.NotoSerifSC,
         FontWeight.SemiBold, FontWeight.Bold, 0f, greetingItalic = false)
     ArtStyle.EDITORIAL -> ArtType(ArtFonts.Playfair, ArtFonts.NotoSansSC, ArtFonts.Playfair,

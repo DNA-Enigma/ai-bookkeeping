@@ -199,7 +199,7 @@ private fun AssistantBlock() {
     Spacer(Modifier.height(14.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         listOf("专业顾问", "贴心管家", "毒舌闺蜜", "极简助手").forEach { name ->
-            ArtChip(name, selected = persona == name) { persona = name }
+            ArtChip(name, selected = persona == name, onClick = { persona = name })
         }
     }
     Spacer(Modifier.height(28.dp))
@@ -207,7 +207,7 @@ private fun AssistantBlock() {
     Spacer(Modifier.height(14.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         listOf("余额宝", "零钱通", "朝朝宝").forEach { name ->
-            ArtChip(name, selected = platform == name) { platform = name }
+            ArtChip(name, selected = platform == name, onClick = { platform = name })
         }
     }
     Spacer(Modifier.height(16.dp))

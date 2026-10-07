@@ -226,7 +226,7 @@ fun ChatScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             listOf("午饭花了 35", "这个月餐饮花了多少", "这个月咖啡多少钱", "给我省钱建议").forEach { q ->
-                ArtChip(q, selected = false) { userSay(q) }
+                ArtChip(q, selected = false, onClick = { userSay(q) })
             }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
