@@ -1,10 +1,11 @@
 package dev.dzsun.bookkeeping.feature.report
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,478 +14,291 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.dzsun.bookkeeping.core.designsystem.*
 import java.time.YearMonth
-import dev.dzsun.bookkeeping.core.designsystem.BrandBlue
-import dev.dzsun.bookkeeping.core.designsystem.CreamFill
-import dev.dzsun.bookkeeping.core.designsystem.ExpenseOrange
-import dev.dzsun.bookkeeping.core.designsystem.IncomeGreen
-import dev.dzsun.bookkeeping.core.designsystem.categoryColor
-import dev.dzsun.bookkeeping.core.money.Money
-import kotlin.math.abs
 
 /**
- * 月度报表：收支总览 → 超预算提醒 → 分类占比 → 日均与环比。
- *
- * 与「报表」标签页（[dev.dzsun.bookkeeping.feature.stats.StatsScreen]）的分工：
- * 那一页看**周期对比**（本月/近三月/今年）与趋势，这一页看**单独一个月**
- * 花在了哪里、预算还够不够。聚合口径两边共用同一组 SQL 投影，所以数字不会打架。
+ * ============================================================
+ *  报表页（集成版）
+ *  数据源：ReportViewModel（原报表 ViewModel，直接复用）
+ *   - 支出构成环图 + 图例 ← report.categories（真实聚合，含预算水位）
+ *   - 收入/支出/结余/环比 ← report（MonthlyReport 展示口径已算好）
+ *   - 月份切换             ← onPreviousMonth / onNextMonth
+ *  半年趋势与收支对比：MonthlyReportSource 按月查询，
+ *  需要 6 个月聚合接口（TODO 在 ViewModel 增 observeRecentMonths），
+ *  当前为演示数据。
+ * ============================================================
  */
-@OptIn(ExperimentalMaterial3Api::class)
+
+private fun fmt(minor: Long): String = "%,.2f".format(kotlin.math.abs(minor) / 100.0)
+private fun fmtInt(minor: Long): String = "%,d".format(kotlin.math.abs(minor) / 100)
+
 @Composable
-fun ReportScreen(
-    onBack: () -> Unit,
-    viewModel: ReportViewModel = hiltViewModel(),
-) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
+fun ReportScreen(viewModel: ReportViewModel = hiltViewModel()) {
+    val ui by viewModel.state.collectAsStateWithLifecycle()
+    val report = ui.report
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("月度报表", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            MonthSwitcher(
-                month = state.month,
-                canGoNext = state.canGoNext,
-                onPrevious = viewModel::onPreviousMonth,
-                onNext = viewModel::onNextMonth,
-            )
-
-            val report = state.report
-            if (report == null) {
-                LoadingBody()
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    item { TotalsCard(report) }
-                    if (report.overspent.isNotEmpty()) {
-                        item { OverspendCard(report) }
-                    }
-                    item { CategoryCard(report) }
-                    item { DailyAndChangeCard(report) }
-                    item { Spacer(Modifier.height(24.dp)) }
-                }
-            }
-        }
-    }
-}
-
-/** 月份切换。**不允许翻到未来**——未来的月份只有空数据，翻过去像是账丢了。 */
-@Composable
-private fun MonthSwitcher(
-    month: YearMonth,
-    canGoNext: Boolean,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit,
-) {
-    Row(
+    Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
+            .fillMaxSize()
+            .background(Art.colors.bg)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 22.dp)
     ) {
-        IconButton(onClick = onPrevious) {
-            Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "上一个月")
-        }
-        Text(
-            "${month.year} 年 ${month.monthValue} 月",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 12.dp),
-        )
-        IconButton(onClick = onNext, enabled = canGoNext) {
-            Icon(
-                Icons.Default.KeyboardArrowRight,
-                contentDescription = "下一个月",
-                tint = if (canGoNext) {
-                    MaterialTheme.colorScheme.onSurface
-                } else {
-                    // 翻不动的时候要看得出来翻不动，而不是点了没反应
-                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
-                },
-            )
-        }
-    }
-}
+        Spacer(Modifier.height(28.dp))
+        ReportHero(ui.month, report, ui.canGoPrevious, ui.canGoNext, viewModel::onPreviousMonth, viewModel::onNextMonth)
 
-@Composable
-private fun LoadingBody() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator()
-    }
-}
-
-/** 收入 / 支出 / 净额。三个都是大字，但净额单独一行——手机宽度放不下三列长金额。 */
-@Composable
-private fun TotalsCard(report: MonthlyReport) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                TotalCell(
-                    label = "本月收入",
-                    amountMinor = report.incomeMinor,
-                    currency = report.currency,
-                    color = IncomeGreen,
-                    modifier = Modifier.weight(1f),
-                )
-                TotalCell(
-                    label = "本月支出",
-                    amountMinor = report.expenseMinor,
-                    currency = report.currency,
-                    color = ExpenseOrange,
-                    modifier = Modifier.weight(1f),
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 14.dp))
-
+        if (report == null) {
             Text(
-                "本月结余",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                "正在算账……",
+                modifier = Modifier.padding(vertical = 48.dp),
+                style = TextStyle(fontSize = 13.5.sp, fontFamily = Art.type.body),
+                color = Art.colors.ink3,
             )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = signed(report.netMinor, report.currency),
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Black,
-                color = if (report.netMinor >= 0) IncomeGreen else MaterialTheme.colorScheme.error,
-            )
+        } else {
+            SectionHeader(1, "支出构成")
+            DonutBlock(report)
+            Spacer(Modifier.height(44.dp))
+            SectionHeader(2, "半年支出趋势")
+            TrendBlock()
+            Spacer(Modifier.height(44.dp))
+            SectionHeader(3, "收支对比")
+            CompareBlock(report)
         }
+        Spacer(Modifier.height(110.dp))
     }
 }
 
 @Composable
-private fun TotalCell(
-    label: String,
-    amountMinor: Long,
-    currency: String,
-    color: Color,
-    modifier: Modifier = Modifier,
+private fun ReportHero(
+    month: YearMonth, report: MonthlyReport?,
+    canPrev: Boolean, canNext: Boolean,
+    onPrev: () -> Unit, onNext: () -> Unit,
 ) {
-    Column(modifier = modifier) {
+    val p = Art.colors
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(26.dp).height(1.dp).background(p.accent))
+        Spacer(Modifier.width(12.dp))
         Text(
-            label,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            Money.of(amountMinor, currency).format(),
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = color,
+            "报告 · ${month.year} 年 ${month.monthValue} 月",
+            style = TextStyle(fontSize = 11.5.sp, letterSpacing = 3.sp, fontFamily = Art.type.body),
+            color = if (p.dark) p.accent else p.ink2,
         )
     }
-}
-
-/**
- * 超预算汇总。
- *
- * 放在分类卡之前单列一张，是因为这是这一页唯一需要用户**立刻做决定**的东西——
- * 混在分类列表里，用户扫一眼占比就走了。
- */
-@Composable
-private fun OverspendCard(report: MonthlyReport) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer,
-        ),
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.Warning,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "${report.overspent.size} 个分类超了预算",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            report.overspent.forEach { line ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        line.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        "超 " + Money.of(line.overspendMinor, report.currency).format(),
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CategoryCard(report: MonthlyReport) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Text(
-                "钱花在哪了",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(12.dp))
-
-            if (report.categories.isEmpty()) {
-                Text(
-                    "这个月还没有支出记录",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                return@Column
-            }
-
-            report.categories.forEachIndexed { index, line ->
-                if (index > 0) Spacer(Modifier.height(14.dp))
-                CategoryRow(line, report.currency)
-            }
-        }
-    }
-}
-
-@Composable
-private fun CategoryRow(line: CategoryReportLine, currency: String) {
-    val levelColor = when (line.level) {
-        BudgetLevel.OVER -> MaterialTheme.colorScheme.error
-        BudgetLevel.NEAR -> CreamFill
-        BudgetLevel.OK -> BrandBlue
-        BudgetLevel.UNSET -> categoryColor(line.name)
-    }
-    // 有条比例条、两个含义：设了预算看"预算用了多少"，没设预算看"占总支出多少"。
-    // 下面的文案跟着切换，不让同一根条有两种读法却长得一样
-    val fraction = (line.usage ?: line.share).coerceIn(0f, 1f)
-
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Spacer(Modifier.height(16.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "收支报告",
+            style = TextStyle(fontFamily = Art.type.display, fontWeight = Art.type.heroWeight, fontSize = 38.sp, letterSpacing = 1.sp),
+            color = p.ink,
+        )
+        // 月份切换
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(categoryColor(line.name)),
-            )
-            Spacer(Modifier.width(10.dp))
-            Text(line.name, modifier = Modifier.weight(1f))
-            Text(
-                Money.of(line.spentMinor, currency).format(),
-                fontWeight = FontWeight.Medium,
-            )
-        }
-
-        Spacer(Modifier.height(6.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(6.dp)
-                .clip(RoundedCornerShape(3.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(fraction)
-                    .height(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(levelColor),
-            )
-        }
-
-        Spacer(Modifier.height(4.dp))
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = if (line.usage != null) {
-                    "已用 ${percent(line.usage)}"
-                } else {
-                    "占 ${percent(line.share)}"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = if (line.level == BudgetLevel.OVER) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-            Spacer(Modifier.weight(1f))
-            BudgetNote(line, currency)
+            Text("←", Modifier.clickable(enabled = canPrev, onClick = onPrev).padding(10.dp),
+                style = TextStyle(fontSize = 16.sp), color = if (canPrev) p.ink else p.line)
+            Text("→", Modifier.clickable(enabled = canNext, onClick = onNext).padding(10.dp),
+                style = TextStyle(fontSize = 16.sp), color = if (canNext) p.ink else p.line)
         }
     }
-}
-
-/** 右侧那句预算说明。三档各自说人话，不共用一句含糊的「预算」。 */
-@Composable
-private fun BudgetNote(line: CategoryReportLine, currency: String) {
-    val budget = line.budgetMinor
-    when {
-        budget == null -> Text(
-            "未设预算",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        line.level == BudgetLevel.OVER -> Text(
-            "预算 ${Money.of(budget, currency).format()} · 已超",
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.error,
-        )
-
-        line.level == BudgetLevel.NEAR -> Text(
-            "预算 ${Money.of(budget, currency).format()} · 接近",
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = CreamFill,
-        )
-
-        else -> Text(
-            "预算 ${Money.of(budget, currency).format()}",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun DailyAndChangeCard(report: MonthlyReport) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "日均支出",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        // 分母为 0（未来的月份）时显示「—」：显示 ¥0 会读成"花得很少"
-                        if (report.daysInAverage > 0) {
-                            Money.of(report.dailyAverageMinor, report.currency).format()
-                        } else {
-                            "—"
-                        },
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    if (report.daysInAverage > 0) {
-                        Text(
-                            "按 ${report.daysInAverage} 天算",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+    Spacer(Modifier.height(10.dp))
+    if (report != null) {
+        Text(
+            buildAnnotatedString {
+                append("支出 ")
+                withStyle(SpanStyle(color = p.ink, fontWeight = FontWeight.Medium)) { append("¥${fmt(report.expenseMinor)}") }
+                report.changeRatio?.let { ratio ->
+                    append("，较上月 ")
+                    val pct = "%.1f".format(kotlin.math.abs(ratio) * 100)
+                    withStyle(SpanStyle(color = if (ratio > 0) p.warn else p.pos, fontWeight = FontWeight.Medium)) {
+                        append(if (ratio > 0) "+$pct%" else "−$pct%")
                     }
                 }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "比上月",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    val change = report.changeRatio
-                    Text(
-                        text = change?.let {
-                            (if (it >= 0) "+" else "−") + percent(abs(it))
-                        } ?: "—",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = when {
-                            change == null -> MaterialTheme.colorScheme.onSurfaceVariant
-                            change > 0 -> MaterialTheme.colorScheme.error
-                            change < 0 -> IncomeGreen
-                            else -> MaterialTheme.colorScheme.onSurface
-                        },
-                    )
-                    Text(
-                        // 上月没有支出时环比是算不出来的，这里如实说，
-                        // 而不是把除数当 1 硬凑一个百分比
-                        if (change == null) "上月没有支出" else "支出同比变化",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                append("。")
+            },
+            style = TextStyle(fontSize = 14.sp, lineHeight = 23.sp, fontFamily = Art.type.body),
+            color = p.ink2,
+        )
+    }
+    Spacer(Modifier.height(36.dp))
+}
+
+/* ---------------- 环图 + 图例（真实数据） ---------------- */
+
+@Composable
+private fun DonutBlock(report: MonthlyReport) {
+    val p = Art.colors
+    // 取前 5 类，其余合并为「其他」
+    val lines = report.categories
+    val shown = lines.take(5)
+    val restShare = lines.drop(5).sumOf { it.share.toDouble() }.toFloat()
+    val slices = shown.map { it.name to it.share } + listOfNotNull(
+        if (restShare > 0.001f) "其他" to restShare else null
+    )
+    val strokeDp = when (Art.style) {
+        ArtStyle.MINIMAL -> 22.dp
+        ArtStyle.EDITORIAL -> 14.dp
+        else -> 17.dp
+    }
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(220.dp), contentAlignment = Alignment.Center) {
+            Canvas(Modifier.fillMaxSize()) {
+                val stroke = Stroke(width = strokeDp.toPx())
+                val padPx = strokeDp.toPx() / 2 + 2.dp.toPx()
+                val arcSize = Size(size.width - padPx * 2, size.height - padPx * 2)
+                val topLeft = Offset(padPx, padPx)
+                var start = -90f
+                slices.forEachIndexed { i, (_, share) ->
+                    val sweep = share * 360f
+                    drawArc(p.chart[i % p.chart.size], start, (sweep - 1.4f).coerceAtLeast(0.5f), false, topLeft, arcSize, style = stroke)
+                    start += sweep
+                }
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("总支出", style = TextStyle(fontSize = 10.5.sp, letterSpacing = 3.sp), color = p.ink3)
+                Spacer(Modifier.height(6.dp))
+                Text("¥${fmtInt(report.expenseMinor)}",
+                    style = TextStyle(fontFamily = Art.type.num, fontWeight = Art.type.numWeight, fontSize = 26.sp, fontFeatureSettings = "tnum"),
+                    color = p.ink)
+                Spacer(Modifier.height(4.dp))
+                if (report.daysInAverage > 0) {
+                    Text("日均 ¥${fmt(report.dailyAverageMinor)}",
+                        style = TextStyle(fontSize = 11.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"),
+                        color = p.pos)
                 }
             }
         }
     }
+    Spacer(Modifier.height(28.dp))
+    Column {
+        slices.forEachIndexed { i, (name, share) ->
+            if (i == 0) Box(Modifier.fillMaxWidth().height(1.dp).background(p.line))
+            val line = shown.getOrNull(i)
+            // 超预算的类目用警示色（预算水位来自 CategoryReportLine.usage）
+            val overspent = line?.usage?.let { it > 1f } == true
+            Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(9.dp).clip(RoundedCornerShape(1.dp)).background(p.chart[i % p.chart.size]))
+                Spacer(Modifier.width(14.dp))
+                Text(name, Modifier.weight(1f), style = TextStyle(fontSize = 14.sp, fontFamily = Art.type.body), color = p.ink)
+                if (overspent) {
+                    Text("超预算", style = TextStyle(fontSize = 10.5.sp, letterSpacing = 1.sp), color = p.warn)
+                    Spacer(Modifier.width(12.dp))
+                }
+                Text("${(share * 100).toInt()}%", style = TextStyle(fontSize = 13.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"), color = p.ink2)
+                Spacer(Modifier.width(24.dp))
+                Text(
+                    line?.let { fmt(it.spentMinor) } ?: "—",
+                    style = TextStyle(fontSize = 14.5.sp, fontFamily = Art.type.num, fontWeight = Art.type.numWeight, fontFeatureSettings = "tnum"),
+                    color = if (overspent) p.warn else p.ink,
+                )
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
+        }
+    }
 }
 
-private fun percent(ratio: Float): String = "%.1f%%".format(ratio * 100)
+/* ---------------- 半年趋势（演示数据，TODO 6 个月聚合接口） ---------------- */
 
-/** 结余要带符号：不带的「1,000.00」看不出是结余还是缺口。 */
-private fun signed(amountMinor: Long, currency: String): String =
-    (if (amountMinor >= 0) "+" else "−") +
-        Money.of(abs(amountMinor), currency).format()
+@Composable
+private fun TrendBlock() {
+    val p = Art.colors
+    val demo = listOf("五月" to 9.8f, "六月" to 11.2f, "七月" to 10.5f, "八月" to 12.6f, "九月" to 10.9f, "十月" to 11.5f)
+    val maxV = demo.maxOf { it.second }
+    Row(Modifier.fillMaxWidth().height(190.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.Bottom) {
+        demo.forEachIndexed { i, (m, v) ->
+            val cur = i == demo.lastIndex
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Bottom, modifier = Modifier.fillMaxHeight()) {
+                Text("${v}k", style = TextStyle(fontSize = 11.5.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"), color = p.ink2)
+                Spacer(Modifier.height(8.dp))
+                val barW = when (Art.style) { ArtStyle.EDITORIAL -> 10.dp; ArtStyle.LUXE -> 12.dp; else -> 34.dp }
+                Box(
+                    Modifier
+                        .width(barW)
+                        .fillMaxHeight(v / maxV * 0.82f)
+                        .clip(RoundedCornerShape(topStart = p.radius, topEnd = p.radius))
+                        .background(if (cur) p.accent else p.accent.copy(alpha = 0.45f))
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(m, style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.sp, fontFamily = Art.type.body,
+                    fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal),
+                    color = if (cur) p.ink else p.ink3)
+            }
+        }
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(p.line))
+}
+
+/* ---------------- 收支对比（当月真实 + 上月参照） ---------------- */
+
+@Composable
+private fun CompareBlock(report: MonthlyReport) {
+    val p = Art.colors
+    val maxV = maxOf(report.incomeMinor, report.previousExpenseMinor, report.expenseMinor).coerceAtLeast(1)
+    Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+        KeyDot("收入", p.chart[3])
+        KeyDot("支出", p.accent)
+    }
+    Spacer(Modifier.height(20.dp))
+    CmpRow("本月", report.incomeMinor, report.expenseMinor, maxV)
+    if (report.previousExpenseMinor > 0) {
+        CmpRow("上月", null, report.previousExpenseMinor, maxV)
+    }
+}
+
+@Composable
+private fun CmpRow(label: String, incomeMinor: Long?, expenseMinor: Long, maxV: Long) {
+    val p = Art.colors
+    Row(Modifier.fillMaxWidth().padding(bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.width(52.dp), style = TextStyle(fontSize = 12.5.sp, fontFamily = Art.type.body), color = p.ink2)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            if (incomeMinor != null) CmpBar(incomeMinor.toFloat() / maxV, p.chart[3], fmt(incomeMinor))
+            CmpBar(expenseMinor.toFloat() / maxV, p.accent, fmt(expenseMinor))
+        }
+    }
+}
+
+@Composable
+private fun KeyDot(label: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(10.dp).clip(RoundedCornerShape(Art.colors.radius)).background(color))
+        Spacer(Modifier.width(8.dp))
+        Text(label, style = TextStyle(fontSize = 12.sp, fontFamily = Art.type.body), color = Art.colors.ink2)
+    }
+}
+
+@Composable
+private fun CmpBar(fraction: Float, color: Color, label: String) {
+    val p = Art.colors
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .weight(fraction.coerceIn(0.02f, 1f))
+                .height(if (p.stageAsCard) 8.dp else 9.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(color)
+        )
+        Spacer(Modifier.weight((1f - fraction).coerceIn(0f, 0.98f) + 0.001f).height(1.dp))
+        Text(label, style = TextStyle(fontSize = 11.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"), color = p.ink3)
+    }
+}
