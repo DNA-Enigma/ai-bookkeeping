@@ -19,9 +19,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Card
@@ -67,6 +67,7 @@ private val dayHeadingFormatter = DateTimeFormatter.ofPattern("M月d日 EEEE", L
 fun LedgerScreen(
     onAddEntry: () -> Unit,
     onEntryClick: (String) -> Unit = {},
+    onAskClick: () -> Unit = {},
     viewModel: LedgerViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -77,7 +78,7 @@ fun LedgerScreen(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 96.dp),
         ) {
-            item { HomeTopBar() }
+            item { HomeTopBar(onAskClick = onAskClick) }
             item {
                 SummaryCard(
                     state = state,
@@ -122,7 +123,7 @@ fun LedgerScreen(
 }
 
 @Composable
-private fun HomeTopBar() {
+private fun HomeTopBar(onAskClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -138,8 +139,8 @@ private fun HomeTopBar() {
         IconButton(onClick = {}) {
             Icon(Icons.Default.CalendarMonth, contentDescription = "日历")
         }
-        IconButton(onClick = {}) {
-            Icon(Icons.Default.Search, contentDescription = "搜索")
+        IconButton(onClick = onAskClick) {
+            Icon(Icons.Default.AutoAwesome, contentDescription = "问账")
         }
     }
 }

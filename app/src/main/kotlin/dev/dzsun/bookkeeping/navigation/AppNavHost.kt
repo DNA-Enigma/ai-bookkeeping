@@ -51,6 +51,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val ENTRY_DETAIL = "entry/{journalId}"
     const val IMPORT = "import"
+    const val ASK = "ask"
 
     fun entryDetail(journalId: String) = "entry/$journalId"
 }
@@ -81,7 +82,8 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
     val currentRoute = backStackEntry?.destination?.route
     var showAddSheet by remember { mutableStateOf(false) }
     val isDetail = currentRoute?.startsWith("entry/") == true ||
-        currentRoute == Routes.IMPORT
+        currentRoute == Routes.IMPORT ||
+        currentRoute == Routes.ASK
 
     Scaffold(
         bottomBar = {
@@ -122,6 +124,7 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
                     onEntryClick = { journalId ->
                         navController.navigate(Routes.entryDetail(journalId))
                     },
+                    onAskClick = { navController.navigate(Routes.ASK) },
                 )
             }
             composable(Routes.STATS) {
@@ -133,6 +136,11 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
             composable(Routes.SETTINGS) {
                 SettingsScreen(
                     onImportClick = { navController.navigate(Routes.IMPORT) },
+                )
+            }
+            composable(Routes.ASK) {
+                dev.dzsun.bookkeeping.feature.ask.AskScreen(
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(Routes.IMPORT) {
