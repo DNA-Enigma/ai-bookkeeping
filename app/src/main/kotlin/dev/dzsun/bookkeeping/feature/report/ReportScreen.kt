@@ -47,9 +47,8 @@ import java.time.YearMonth
  *   - 支出构成环图 + 图例 ← report.categories（真实聚合，含预算水位）
  *   - 收入/支出/结余/环比 ← report（MonthlyReport 展示口径已算好）
  *   - 月份切换             ← onPreviousMonth / onNextMonth
- *  半年趋势与收支对比：MonthlyReportSource 按月查询，
- *  需要 6 个月聚合接口（TODO 在 ViewModel 增 observeRecentMonths），
- *  当前为演示数据。
+ *   - 半年支出趋势         ← trend（ViewModel.observeRecentMonths，近 6 个月真实聚合）
+ *   - 收支对比             ← report（本月收入/支出 + 上月支出）
  * ============================================================
  */
 
@@ -83,7 +82,7 @@ fun ReportScreen(viewModel: ReportViewModel = hiltViewModel()) {
             DonutBlock(report)
             Spacer(Modifier.height(44.dp))
             SectionHeader(2, "半年支出趋势")
-            TrendBlock()
+            TrendBlock(ui.trend)
             Spacer(Modifier.height(44.dp))
             SectionHeader(3, "收支对比")
             CompareBlock(report)
@@ -219,31 +218,46 @@ private fun DonutBlock(report: MonthlyReport) {
     }
 }
 
-/* ---------------- 半年趋势（演示数据，TODO 6 个月聚合接口） ---------------- */
+/* ---------------- 半年趋势（近 6 个月真实聚合） ---------------- */
+
+private val monthLabels = listOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二")
+private fun monthLabel(ym: YearMonth): String = monthLabels[ym.monthValue - 1] + "月"
 
 @Composable
-private fun TrendBlock() {
+private fun TrendBlock(trend: List<TrendPoint>) {
     val p = Art.colors
-    val demo = listOf("五月" to 9.8f, "六月" to 11.2f, "七月" to 10.5f, "八月" to 12.6f, "九月" to 10.9f, "十月" to 11.5f)
-    val maxV = demo.maxOf { it.second }
-    Row(Modifier.fillMaxWidth().height(190.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.Bottom) {
-        demo.forEachIndexed { i, (m, v) ->
-            val cur = i == demo.lastIndex
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Bottom, modifier = Modifier.fillMaxHeight()) {
-                Text("${v}k", style = TextStyle(fontSize = 11.5.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"), color = p.ink2)
-                Spacer(Modifier.height(8.dp))
-                val barW = when (Art.style) { ArtStyle.EDITORIAL -> 10.dp; ArtStyle.LUXE -> 12.dp; else -> 34.dp }
-                Box(
-                    Modifier
-                        .width(barW)
-                        .fillMaxHeight(v / maxV * 0.82f)
-                        .clip(RoundedCornerShape(topStart = p.radius, topEnd = p.radius))
-                        .background(if (cur) p.accent else p.accent.copy(alpha = 0.45f))
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(m, style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.sp, fontFamily = Art.type.body,
-                    fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal),
-                    color = if (cur) p.ink else p.ink3)
+    // 空列表＝还算不出来（正在切月），不画任何东西
+    if (trend.isEmpty()) return
+    if (trend.all { it.expenseMinor == 0L && it.incomeMinor == 0L }) {
+        Box(Modifier.fillMaxWidth().height(190.dp), contentAlignment = Alignment.Center) {
+            Text(
+                "记几笔就有趋势了",
+                style = TextStyle(fontSize = 13.5.sp, fontFamily = Art.type.body),
+                color = p.ink3,
+            )
+        }
+    } else {
+        val maxV = trend.maxOf { it.expenseMinor }.coerceAtLeast(1L)
+        Row(Modifier.fillMaxWidth().height(190.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.Bottom) {
+            trend.forEachIndexed { i, point ->
+                val cur = i == trend.lastIndex
+                val v = point.expenseMinor
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Bottom, modifier = Modifier.fillMaxHeight()) {
+                    Text(if (v == 0L) "0" else fmt(v), style = TextStyle(fontSize = 11.5.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"), color = p.ink2)
+                    Spacer(Modifier.height(8.dp))
+                    val barW = when (Art.style) { ArtStyle.EDITORIAL -> 10.dp; ArtStyle.LUXE -> 12.dp; else -> 34.dp }
+                    Box(
+                        Modifier
+                            .width(barW)
+                            .fillMaxHeight(v.toFloat() / maxV * 0.82f)
+                            .clip(RoundedCornerShape(topStart = p.radius, topEnd = p.radius))
+                            .background(if (cur) p.accent else p.accent.copy(alpha = 0.45f))
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(monthLabel(point.yearMonth), style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.sp, fontFamily = Art.type.body,
+                        fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal),
+                        color = if (cur) p.ink else p.ink3)
+                }
             }
         }
     }

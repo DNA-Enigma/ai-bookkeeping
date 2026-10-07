@@ -22,6 +22,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.dzsun.bookkeeping.core.designsystem.*
+import java.time.YearMonth
 
 /**
  * ============================================================
@@ -110,7 +111,10 @@ private fun LedgerHero() {
                 .border(1.dp, p.line, RoundedCornerShape(999.dp))
                 .padding(horizontal = 14.dp, vertical = 7.dp)
         ) {
-            Text("2025 年 10 月", style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.5.sp), color = p.ink2)
+            // 与报表页同源的年月（报表页是 YearMonth.from(SystemClock.today())，等价于系统时钟）；
+            // 账簿页没有 ViewModel，为这一行引一个不划算。
+            val month = YearMonth.now()
+            Text("${month.year} 年 ${month.monthValue} 月", style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.5.sp), color = p.ink2)
         }
     }
     Spacer(Modifier.height(10.dp))
