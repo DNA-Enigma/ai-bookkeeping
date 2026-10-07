@@ -53,7 +53,14 @@ fun LedgerBookScreen(viewModel: LedgerBookViewModel = hiltViewModel()) {
     ) {
         Spacer(Modifier.height(28.dp))
         LedgerHero(ui.month)
-        if (ui.isEmpty) {
+        if (ui.isLoading) {
+            Text(
+                "正在读账本…",
+                modifier = Modifier.padding(vertical = 48.dp),
+                style = TextStyle(fontSize = 13.5.sp, fontFamily = Art.type.body),
+                color = Art.colors.ink3,
+            )
+        } else if (ui.isEmpty) {
             Text(
                 "本月还没有分录",
                 modifier = Modifier.padding(vertical = 48.dp),

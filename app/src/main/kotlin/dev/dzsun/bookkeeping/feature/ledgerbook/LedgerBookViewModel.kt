@@ -62,6 +62,14 @@ data class LedgerBookUiState(
     val vouchers: List<VoucherUi> = emptyList(),
     /** 该月（含期初）完全没有分录。空态不显示假科目、假凭证。 */
     val isEmpty: Boolean = true,
+    /**
+     * Room 首帧还没到。
+     *
+     * 这一位不能省：[isEmpty] 默认为真，首帧到达前页面会把加载中当成
+     * 「本月还没有分录」——那是在告诉用户一个还没算出来的结论。
+     * （与 `MonthlyReportQuery` 里「不算出来 ≠ 空」的约定同源。）
+     */
+    val isLoading: Boolean = true,
 ) {
     /** 借贷不平。真不平时差额会照实显示，不四舍五入掩盖。 */
     val isUnbalanced: Boolean get() = totalDebitMinor != totalCreditMinor
@@ -90,7 +98,7 @@ class LedgerBookViewModel @Inject constructor(
                 repository.observeVoucherLines(month),
             ) { balances, lines ->
                 assemble(month, balances, lines)
-            }.collect { _state.update { it } }
+            }.collect { _state.update { it.copy(isLoading = false) } }
         }
     }
 
