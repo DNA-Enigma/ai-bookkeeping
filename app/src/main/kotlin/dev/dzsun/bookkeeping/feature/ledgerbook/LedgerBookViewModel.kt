@@ -98,7 +98,11 @@ class LedgerBookViewModel @Inject constructor(
                 repository.observeVoucherLines(month),
             ) { balances, lines ->
                 assemble(month, balances, lines)
-            }.collect { _state.update { it.copy(isLoading = false) } }
+            }.collect { fresh ->
+                // 参数名必须显式：内层 update 的 it 会遮蔽外层 collect 的 it，
+                // 写成 `_state.update { it.copy(...) }` 会把旧 state 写回去，数据全丢。
+                _state.update { fresh.copy(isLoading = false) }
+            }
         }
     }
 

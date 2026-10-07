@@ -144,7 +144,7 @@ private fun BalanceTable(ui: LedgerBookUiState) {
     val p = Art.colors
     val ruleColor = if (p.dark) p.accent else p.ink
     Column(Modifier.horizontalScroll(rememberScrollState())) {
-        Column(Modifier.widthIn(min = 560.dp)) {
+        Column(Modifier.width(560.dp)) {
             // 表头
             Row(
                 Modifier
