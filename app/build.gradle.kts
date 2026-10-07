@@ -63,6 +63,8 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
+    // 可下载艺术字体（Noto Serif SC / Playfair / Inter / Cormorant），版本由 compose-bom 管理
+    implementation("androidx.compose.ui:ui-text-google-fonts")
     debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.androidx.lifecycle.runtime.compose)
@@ -83,3 +85,4 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
 }
+
