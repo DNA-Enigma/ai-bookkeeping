@@ -347,6 +347,38 @@ class LedgerRepository @Inject constructor(
 
     suspend fun accountName(id: String): String? = database.accountDao().nameOf(id)
 
+    /**
+     * 把若干凭证的分类改到另一个分类头上（陌生商户批量归类）。
+     *
+     * 导入时这些行没有历史可依，落在了兜底分类（「其他支出」）；用户确认归类之后，
+     * 要把它们真正挪过去。**同时也是「学一遍」**：`categoryForMerchant` 读的就是
+     * 历史分录，改完之后下次导入同一个商户就会被认出来，不需要另建一张映射表——
+     * 多一张表就多一处要和账本同步的状态。
+     *
+     * 只改分类那一侧的分录，金额与资产侧一分不动，凭证仍然平。
+     * 目标账户不存在、或不是收支分类时**拒绝**：把分录挂到资产账户上，
+     * 这笔账会从收支报表里静默消失，那比报错难发现得多。
+     *
+     * @return 真正改到的分录条数。一笔都没改到（凭证不存在、或本来就没有分类分录）
+     *   时返回 0，调用方据此如实说，而不是把「没改到」当成「改好了」。
+     */
+    suspend fun recategorize(journalIds: List<String>, categoryAccountId: String): Int {
+        if (journalIds.isEmpty()) return 0
+        val target = requireNotNull(database.accountDao().findById(categoryAccountId)) {
+            "分类账户不存在：$categoryAccountId"
+        }
+        require(target.type == AccountType.EXPENSE || target.type == AccountType.INCOME) {
+            "只能改挂到收支分类上，${target.name} 是 ${target.type}"
+        }
+
+        val now = clock.nowMillis()
+        return database.withTransaction {
+            val changed = database.postingDao().reassignCategory(journalIds, categoryAccountId)
+            if (changed > 0) database.journalDao().touch(journalIds, now)
+            changed
+        }
+    }
+
     companion object {
         /**
          * 去重的时间窗，前后各 3 天。

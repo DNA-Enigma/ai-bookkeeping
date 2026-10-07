@@ -133,10 +133,22 @@ data class ImportPlan(
             statusChanged.size + excluded.size + unusable.size
 }
 
-/** 落库结果。[failures] 只记「写不进去」的，不含用户主动跳过的。 */
+/** 落库成功的一行：把「刚导入的这笔」与「它的商户」对上。 */
+data class PostedEntry(val entry: PlannedEntry, val journalId: String)
+
+/**
+ * 落库结果。[failures] 只记「写不进去」的，不含用户主动跳过的。
+ *
+ * [posted] 是**落库成功那些行的明细**，不是计数。批量归类要在导入**之后**改分类，
+ * 那时手里只剩商户名；没有这层对应关系，就只能拿商户名回全表模糊搜——那是另一种猜，
+ * 而且会把用户以前手记的同名商户一起改掉。
+ *
+ * 冲减（[PlannedReversal]）落库的不在这里：它没有商户语义，改分类无从谈起。
+ */
 data class ImportOutcome(
     val imported: Int,
     val failures: List<String>,
+    val posted: List<PostedEntry> = emptyList(),
 )
 
 /** 「把文件变成解析结果」这一步的三种结局。 */
@@ -383,12 +395,14 @@ class StatementImporter @Inject constructor(
     ): ImportOutcome = withContext(Dispatchers.IO) {
         var imported = 0
         val failures = mutableListOf<String>()
+        val posted = mutableListOf<PostedEntry>()
         val postedByKey = mutableMapOf<Pair<String, String>, String>()
 
         for (entry in entries) {
             runCatching { repository.post(toJournalDraft(entry)) }
                 .onSuccess { id ->
                     imported++
+                    posted += PostedEntry(entry, id)
                     postedByKey[entry.row.externalSource to entry.row.externalRef] = id
                 }
                 .onFailure { failures += "第 ${entry.row.rowNumber} 行入账失败：${it.message}" }
@@ -413,7 +427,7 @@ class StatementImporter @Inject constructor(
                 .onFailure { failures += "第 ${reversal.row.rowNumber} 行的退款冲减失败：${it.message}" }
         }
 
-        ImportOutcome(imported, failures)
+        ImportOutcome(imported, failures, posted)
     }
 }
 

@@ -143,6 +143,10 @@ interface JournalDao {
     @Query("UPDATE journal SET externalStatus = :status, updatedAt = :updatedAt WHERE id = :journalId")
     suspend fun updateExternalStatus(journalId: String, status: String?, updatedAt: Long)
 
+    /** 改挂分类之后刷新凭证的更新时间，让账目列表的重排与缓存失效跟上。 */
+    @Query("UPDATE journal SET updatedAt = :updatedAt WHERE id IN (:journalIds)")
+    suspend fun touch(journalIds: List<String>, updatedAt: Long)
+
     /**
      * 这个商户以前被归到哪个分类——**用用户自己的历史，不用模型**。
      *
@@ -287,6 +291,25 @@ interface PostingDao {
 
     @Query("SELECT COALESCE(SUM(amountMinor), 0) FROM posting WHERE journalId = :journalId")
     suspend fun sumOfJournal(journalId: String): Long
+
+    /**
+     * 把若干凭证的**分类分录**改挂到另一个分类账户上（陌生商户归类用）。
+     *
+     * 只动 `EXPENSE` / `INCOME` 那一侧：资产、负债那侧不动，于是**金额一分不变、
+     * 借贷仍然平**，只是这笔账从此算在另一个分类头上。金额要变的话那是另一回事
+     * （改账），不该混进「归类」这个动作里。
+     *
+     * 返回改动的行数——界面靠它说「改了 N 笔」，也靠它发现「一笔都没改到」
+     * （参数对不上时不能默默算成功）。
+     */
+    @Query(
+        """
+        UPDATE posting SET accountId = :categoryAccountId
+        WHERE journalId IN (:journalIds)
+          AND accountId IN (SELECT id FROM account WHERE type IN ('EXPENSE', 'INCOME'))
+        """,
+    )
+    suspend fun reassignCategory(journalIds: List<String>, categoryAccountId: String): Int
 
     /**
      * 某类账户在日期区间内的净额。支出是正数、收入也是正数，方向由 [type] 区分。

@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
@@ -131,8 +133,13 @@ fun ImportScreen(
 
                 is ImportStage.Committed -> CommittedPane(
                     outcome = stage.outcome,
+                    state = state,
                     onDone = onDone,
                     onRestart = viewModel::restart,
+                    onClassify = viewModel::onClassifyMerchants,
+                    onSuggestionChanged = viewModel::onSuggestionChanged,
+                    onApplySuggestions = viewModel::onApplySuggestions,
+                    onDismissClassification = viewModel::onDismissClassification,
                 )
             }
         }
@@ -674,61 +681,82 @@ private fun SkipBadge(text: String) {
 @Composable
 private fun CommittedPane(
     outcome: ImportOutcome,
+    state: ImportUiState,
     onDone: () -> Unit,
     onRestart: () -> Unit,
+    onClassify: () -> Unit,
+    onSuggestionChanged: (String, String) -> Unit,
+    onApplySuggestions: () -> Unit,
+    onDismissClassification: () -> Unit,
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Spacer(Modifier.height(24.dp))
-        Icon(
-            Icons.Default.CheckCircle,
-            contentDescription = null,
-            modifier = Modifier.size(64.dp),
-            tint = IncomeGreen,
-        )
-        Text(
-            "已导入 ${outcome.imported} 笔",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-        )
-        if (outcome.failures.isNotEmpty()) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.ErrorOutline,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "${outcome.failures.size} 笔写入失败",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    outcome.failures.forEach { msg ->
-                        Text(msg, style = MaterialTheme.typography.bodySmall)
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Spacer(Modifier.height(8.dp))
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = null,
+                modifier = Modifier.size(64.dp),
+                tint = IncomeGreen,
+            )
+            Text(
+                "已导入 ${outcome.imported} 笔",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            if (outcome.failures.isNotEmpty()) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.ErrorOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "${outcome.failures.size} 笔写入失败",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        outcome.failures.forEach { msg ->
+                            Text(msg, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
+            } else {
+                Text(
+                    "已按预览结果落账。明细可在账本里逐笔查看。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
             }
-        } else {
-            Text(
-                "已按预览结果落账。明细可在账本里逐笔查看。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
+
+            ClassificationSection(
+                state = state,
+                onClassify = onClassify,
+                onSuggestionChanged = onSuggestionChanged,
+                onApplySuggestions = onApplySuggestions,
+                onDismissClassification = onDismissClassification,
             )
         }
 
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(16.dp))
 
         Button(
             onClick = onDone,
@@ -738,6 +766,7 @@ private fun CommittedPane(
         ) {
             Text("完成")
         }
+        Spacer(Modifier.height(8.dp))
         OutlinedButton(
             onClick = onRestart,
             modifier = Modifier
@@ -745,6 +774,252 @@ private fun CommittedPane(
                 .height(48.dp),
         ) {
             Text("再导入一份")
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 陌生商户归类
+
+/**
+ * 「发现 N 个陌生商户，是否智能归类？」
+ *
+ * 这一整块只在**导入之后**出现：落库之前谈不上「陌生」——那时用户还在核对预览，
+ * 分类本来就还是兜底的。判别「陌生」的判据是 `categoryFromHistory`，
+ * 也就是「本机历史里查不到这个商户」，不是「模型不认识」。
+ */
+@Composable
+private fun ClassificationSection(
+    state: ImportUiState,
+    onClassify: () -> Unit,
+    onSuggestionChanged: (String, String) -> Unit,
+    onApplySuggestions: () -> Unit,
+    onDismissClassification: () -> Unit,
+) {
+    when {
+        state.shouldOfferClassification -> OfferClassificationCard(state, onClassify, onDismissClassification)
+
+        state.showingSuggestions -> SuggestionList(
+            state = state,
+            onSuggestionChanged = onSuggestionChanged,
+            onApplySuggestions = onApplySuggestions,
+            onDismissClassification = onDismissClassification,
+        )
+
+        state.appliedCount != null -> AppliedCard(state)
+
+        // 拿不到建议：说清为什么，并留一次重试——调度层可能只是刚起来
+        state.classifyNote != null -> NoteCard(state.classifyNote, onClassify)
+
+        state.classifying -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(12.dp))
+            Text("正在让调度层归类…", style = MaterialTheme.typography.bodyMedium)
+        }
+
+        else -> Unit
+    }
+}
+
+@Composable
+private fun OfferClassificationCard(
+    state: ImportUiState,
+    onClassify: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "发现 ${state.unknownMerchants.size} 个陌生商户，是否智能归类？",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                state.unknownMerchants.take(3).joinToString("、") { it.payee } +
+                    if (state.unknownMerchants.size > 3) " 等" else "",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "这些商户这次落在了兜底分类上。归类之后，下次导入同一家会自动用上。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onClassify,
+                    enabled = !state.classifying,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("智能归类")
+                }
+                OutlinedButton(onClick = onDismiss) {
+                    Text("不用了")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionList(
+    state: ImportUiState,
+    onSuggestionChanged: (String, String) -> Unit,
+    onApplySuggestions: () -> Unit,
+    onDismissClassification: () -> Unit,
+) {
+    val suggestions = state.suggestions.orEmpty()
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "归类建议",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "逐个确认，或者直接全部采纳。核对不出来的那一行要点一下才能继续。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+
+            suggestions.forEach { suggestion ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(suggestion.payee, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "出现 ${state.unknownMerchants.firstOrNull { it.payee == suggestion.payee }?.occurrences ?: 1} 次",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    CategoryPicker(
+                        categories = state.categories,
+                        selectedId = suggestion.categoryId,
+                        placeholder = suggestion.categoryName?.let { "「$it」对不上科目表" } ?: "选择分类",
+                        onSelected = { onSuggestionChanged(suggestion.payee, it) },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onApplySuggestions,
+                    enabled = state.canApplySuggestions,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    if (state.classifying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    } else {
+                        Text(if (state.canApplySuggestions) "全部采纳" else "请先选好分类")
+                    }
+                }
+                OutlinedButton(onClick = onDismissClassification) {
+                    Text("不用了")
+                }
+            }
+        }
+    }
+}
+
+/** 一个分类下拉。分类来自科目表，**不写死**——用户增删改分类之后这里自动跟上。 */
+@Composable
+private fun CategoryPicker(
+    categories: List<AccountEntity>,
+    selectedId: String?,
+    placeholder: String,
+    onSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedName = categories.find { it.id == selectedId }?.name
+
+    Box {
+        OutlinedButton(onClick = { if (categories.isNotEmpty()) expanded = true }) {
+            Text(selectedName ?: placeholder)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            categories.forEach { category ->
+                DropdownMenuItem(
+                    text = { Text(category.name) },
+                    onClick = {
+                        onSelected(category.id)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppliedCard(state: ImportUiState) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                if (state.appliedCount == 0) {
+                    "没有需要改的账目"
+                } else {
+                    "已把 ${state.appliedCount} 笔改到新分类"
+                },
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "下次导入同一个商户会自动用上这个分类。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            state.applyError?.let { error ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NoteCard(note: String, onRetry: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("暂时无法智能归类", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                note,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "不影响已导入的账目；也可以在账本里逐笔改分类。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = onRetry) { Text("重试") }
         }
     }
 }
