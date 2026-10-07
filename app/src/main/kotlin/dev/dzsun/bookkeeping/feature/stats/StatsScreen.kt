@@ -1,6 +1,10 @@
 package dev.dzsun.bookkeeping.feature.stats
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -142,13 +146,26 @@ private fun AiSummaryCard(state: StatsUiState, onAskClick: () -> Unit = {}) {
                 Text("AI 月度小结", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(10.dp))
-            val insight = state.insights.firstOrNull()
-            Text(
-                insight?.body
-                    ?: "本期支出 ${Money.of(state.expenseMinor, state.currency).toPlainString()}，继续记账就能看到更准的点评。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-            )
+            when (val summary = state.summary) {
+                AiSummaryState.Loading -> SummarySkeleton()
+                is AiSummaryState.Ready -> {
+                    Text(
+                        summary.text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                    )
+                    if (!summary.fromAi) {
+                        // 本地模板拼的句子不许冒充模型分析：说清楚这是降级内容，
+                        // 用户才知道「换台设备/换个网络也许能看到更好的」。
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "暂时连不上 AI，以上为本地小结",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(8.dp))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -159,6 +176,34 @@ private fun AiSummaryCard(state: StatsUiState, onAskClick: () -> Unit = {}) {
                 Text("查看 AI 账单分析", color = BrandBlue, fontWeight = FontWeight.SemiBold)
                 Icon(Icons.Default.ChevronRight, contentDescription = null, tint = BrandBlue, modifier = Modifier.size(16.dp))
             }
+        }
+    }
+}
+
+/**
+ * 等 AI 分析时的骨架屏。
+ *
+ * 三行长短不一的灰条，透明度来回呼吸——比一个转圈更能说明「这里马上会有一段话」，
+ * 也避免了文字从无到有时整张卡片的高度跳变。
+ */
+@Composable
+private fun SummarySkeleton() {
+    val transition = rememberInfiniteTransition(label = "summarySkeleton")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+        label = "summarySkeletonAlpha",
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(1f, 0.9f, 0.55f).forEach { fraction ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(BrandBlue.copy(alpha = alpha * 0.22f)),
+            )
         }
     }
 }
@@ -176,7 +221,9 @@ private fun StatsGrid(state: StatsUiState) {
                 StatCell("本期支出(元)", Money.of(state.expenseMinor, currency).toPlainString(), Modifier.weight(1f))
                 StatCell(
                     "日均支出(元)",
-                    Money.of(state.expenseMinor / 30, currency).toPlainString(),
+                    // 除数与 AI 小结共用 state.periodDays：两处各除各的，屏幕上就会
+                    // 出现两个互相矛盾的日均，而用户没有理由知道该信哪个
+                    Money.of(state.expenseMinor / state.periodDays, currency).toPlainString(),
                     Modifier.weight(1f),
                 )
             }

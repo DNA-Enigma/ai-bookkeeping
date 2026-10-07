@@ -1256,3 +1256,88 @@ class DbAutoEntryUndo @Inject constructor(private val database: LedgerDatabase) 
 - `direct_llm` 那条路（要后端先定 `query_ledger` 的产出形状）；
 - 多商户问句（「星巴克和瑞幸花了多少」）会被当成一个商户名——
   本地词法不做切分，`LIKE '%星巴克和瑞幸%'` 匹配不到，答「没有记录」。等调度层。
+
+### 2026-10-07 · 界面这边（0.12.0：AI 月度小结接上真模型）
+
+统计页那张「AI 月度小结」卡片以前是**本地模板拼字符串**（「占本期支出的 44%。占比偏高…」），
+现在走调度层直答拿一段真的分析。**318 个测试 0 失败 5 跳过**，`0.12.0`（versionCode 11）。
+
+#### 分工上的一个说明
+
+这条链路要发 HTTP，而 `core/network/**` 是你们的地方。我**没有改 `core/**` 一个字**——
+新代码全在 `feature/stats/`，只用你们 `DispatcherClient` 的**公开 API**
+（`submitTask` / `getTask`）。也就是说我没有新增数据层的能力，只是消费已有的。
+如果你们觉得这个 client 该收进 `core/network`（和 `LedgerQueryClient` /
+`DispatcherMerchantCategorizer` 并排），说一声我搬，接口不用变。
+
+#### 为什么这次能用 `direct_llm`
+
+上面 P1-a 那条写「`direct_llm` 是一条补全，产物是 `{answer,…}`——一段话，不是一个结构」，
+所以问账用不了它。**月度小结要的正好就是一段话**，所以那条限制在这里不成立。
+
+数据是**客户端算好塞进 prompt** 的（总支出/收入/结余/日均/分类占比/近 6 月趋势），
+服务端不需要碰账本——这正好满足 `direct_answer` 的适用条件（「不需要任何用户私有数据
+即可回答」）。分工因此是干净的：**算术在本地 SQL，措辞交给模型**。
+
+#### ⚠️ 一条要你们往后端提的（和 P0 那两条同类）
+
+**`direct_llm.timeout_ms: 8000` 对 cheap 档位来说不够，实测多数请求直接超时。**
+
+```
+{"detail":"请求超时（8.0s，档位 cheap）：上游未给出原因（连接超时/读超时都可能走到这里）"}
+```
+
+我把同一份 prompt 连发 4 次：**1 次成功（2.3–4.4 秒）、3 次 8 秒超时**。
+`allowed_model_tiers: ["standard"]` 也压不住它（实测 tier 仍是 `cheap`）。
+这是**你们路线图 M1 验收里记过一次的同一类问题**（「超时值拍脑袋填」），
+现在轮到了直答这一段——`normalize.timeout_ms: 8000` 和它是同一个毛病。
+
+对客户端的实际影响：**降级会成为常态**，所以本地模板那条路不是可有可无的兜底，
+是主路径之一。我按这个前提实现的（卡片上会标「暂时连不上 AI，以上为本地小结」）。
+
+#### 一个契约层面的选择，请你们看一眼
+
+`declared.intent` 我用的是 **`chat.explain`**（taxonomy 里真实存在的类型），
+理由是它的词表描述（「总结，不需要用户私有数据」）与这个请求的形状一致，
+实测稳定落到 `direct_answer`。
+
+但语义上它确实有点别扭——**一份记账汇总被声明成 chat**。我试过
+`bookkeeping.report`，那条会被路由到 `single_tool_action` + `query_ledger`，
+拿回 `{"main":{"entries":[],"count":0}}`（服务端的空账本），不是一段话。
+
+所以要么维持现状（用 `chat.explain`），要么后端给 `bookkeeping.report` 一条
+能落到 `direct_llm` 的路由。**要改的是词表/路由那一侧，不是客户端**——
+我这边只改 `AiSummary.kt` 里 `INTENT_SUMMARY` 一个常量。你们定了告诉我。
+
+#### 顺带：一处口径统一
+
+统计卡的「日均支出」原先是 `expense / 30` 写死的。现在卡片和 AI 小结**共用同一份
+`DAYS_PER_MONTH`**（`StatsUiState.periodDays`）——两处各除各的，屏幕上就会出现
+两个互相矛盾的日均，而用户没有理由知道该信哪个。副作用是「近三月」「今年」两档的
+日均从「按 30 天」变成「按 90/360 天」，那两个数以前是错的。
+
+#### 改了哪些文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `feature/stats/AiSummary.kt` | 新增：`MonthlySummaryFacts`、prompt 组装、产物解析、`AiSummarySource` + 走直答的实现 |
+| `feature/stats/StatsModule.kt` | 新增：`AiSummarySource` 的界面侧绑定（没动 `AppModule`） |
+| `feature/stats/StatsViewModel.kt` | 加 `summary` 状态（骨架/就绪）、按数字去重后才询价、失败降级本地模板 |
+| `feature/stats/StatsScreen.kt` | `AiSummaryCard` 骨架屏 + AI 文案；日均除数统一 |
+| `app/build.gradle.kts` | 版本 `0.11.0` → **`0.12.0`**（versionCode 11） |
+
+#### 验证
+
+`tools/build.sh :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**，
+318 个测试 0 失败。新增 `AiSummaryTest` 14 个（prompt 里的数字、产物的判别、
+终局映射）+ `AiSummaryLiveTest` 1 个（默认跳过）。
+
+`DISPATCHER_LIVE=1` 实跑了一次，**真拿到了分析**（confidence 0.9）：
+
+> 本月总支出 ¥3,200.00，其中餐饮 ¥1,400.00 占 44%，是占比最高的分类；其次是交通
+> ¥800.00，占 25%。建议下月给餐饮定一个明确的月度上限（例如控制在 ¥1,200.00 以内）…
+
+数字全部来自 prompt，没有编造——这正是那句「只使用上面给出的数字」在拦的东西。
+
+**没做**：真机/模拟器上的界面验证。`AiSummaryCard` 的骨架屏与降级文案我只做了
+编译期与单测级的确认，没在设备上看过实际观感。
