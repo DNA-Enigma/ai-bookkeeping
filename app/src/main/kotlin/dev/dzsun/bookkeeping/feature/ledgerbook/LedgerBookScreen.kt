@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -21,6 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dzsun.bookkeeping.core.designsystem.*
 import java.time.YearMonth
 
@@ -28,43 +31,19 @@ import java.time.YearMonth
  * ============================================================
  *  账簿页 · 复式记账（与 HTML 原型 #pg-ledger 1:1 对应）
  *  科目余额表（双线表头/合计）+ 近期凭证（借/贷分录）
+ *
+ *  数据源：LedgerBookViewModel（按月 SQL 聚合：科目余额试算 + 凭证明细）
  * ============================================================
  */
 
-private data class BalRow(
-    val code: String, val name: String,
-    val open: String, val debit: String, val credit: String, val close: String
-)
+private fun fmt(minor: Long): String = "%,.2f".format(kotlin.math.abs(minor) / 100.0)
 
-private val assetRows = listOf(
-    BalRow("1001", "库存现金", "1,200.00", "—", "500.00", "700.00"),
-    BalRow("1002", "银行存款", "28,400.00", "24,300.00", "10,952.94", "41,747.06"),
-    BalRow("1101", "理财 · 余额宝", "15,000.00", "8,000.00", "—", "23,000.00")
-)
-private val expenseRows = listOf(
-    BalRow("5101", "餐饮支出", "—", "3,665.00", "—", "3,665.00"),
-    BalRow("5102", "居住支出", "—", "2,749.00", "—", "2,749.00"),
-    BalRow("5103", "其他支出", "—", "5,038.94", "—", "5,038.94")
-)
-private val incomeRows = listOf(
-    BalRow("6001", "工资收入", "—", "—", "24,300.00", "24,300.00")
-)
-
-private data class Voucher(
-    val no: String, val date: String,
-    val debit: String, val debitAmt: String,
-    val credit: String, val creditAmt: String,
-    val memo: String
-)
-
-private val vouchers = listOf(
-    Voucher("记 · 第 0012 号", "10 月 07 日", "餐饮支出 — 午餐", "86.00", "银行存款", "86.00", "摘要：桂满陇午餐 · 附单据 1 张"),
-    Voucher("记 · 第 0011 号", "10 月 07 日", "交通支出 — 地铁", "6.00", "库存现金", "6.00", "摘要：早高峰通勤"),
-    Voucher("记 · 第 0010 号", "10 月 01 日", "银行存款", "24,300.00", "工资收入 — 九月", "24,300.00", "摘要：月度工资到账 · 已自动分类")
-)
+/** 零金额显示「—」，与会计表格的空位写法一致。 */
+private fun fmtOrDash(minor: Long): String = if (minor == 0L) "—" else fmt(minor)
 
 @Composable
-fun LedgerBookScreen() {
+fun LedgerBookScreen(viewModel: LedgerBookViewModel = hiltViewModel()) {
+    val ui by viewModel.state.collectAsStateWithLifecycle()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -73,18 +52,36 @@ fun LedgerBookScreen() {
             .padding(horizontal = 22.dp)
     ) {
         Spacer(Modifier.height(28.dp))
-        LedgerHero()
-        SectionHeader(1, "余额试算")
-        BalanceTable()
-        Spacer(Modifier.height(44.dp))
-        SectionHeader(2, "近期凭证") { /* TODO 全部凭证 */ }
-        vouchers.forEach { VoucherCard(it); Spacer(Modifier.height(14.dp)) }
+        LedgerHero(ui.month)
+        if (ui.isEmpty) {
+            Text(
+                "本月还没有分录",
+                modifier = Modifier.padding(vertical = 48.dp),
+                style = TextStyle(fontSize = 13.5.sp, fontFamily = Art.type.body),
+                color = Art.colors.ink3,
+            )
+        } else {
+            SectionHeader(1, "余额试算")
+            BalanceTable(ui)
+            Spacer(Modifier.height(44.dp))
+            SectionHeader(2, "近期凭证") { /* TODO 全部凭证 */ }
+            if (ui.vouchers.isEmpty()) {
+                Text(
+                    "本月还没有分录",
+                    modifier = Modifier.padding(vertical = 24.dp),
+                    style = TextStyle(fontSize = 13.5.sp, fontFamily = Art.type.body),
+                    color = Art.colors.ink3,
+                )
+            } else {
+                ui.vouchers.forEach { VoucherCard(it); Spacer(Modifier.height(14.dp)) }
+            }
+        }
         Spacer(Modifier.height(110.dp))
     }
 }
 
 @Composable
-private fun LedgerHero() {
+private fun LedgerHero(month: YearMonth) {
     val p = Art.colors
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.width(26.dp).height(1.dp).background(p.accent))
@@ -111,9 +108,6 @@ private fun LedgerHero() {
                 .border(1.dp, p.line, RoundedCornerShape(999.dp))
                 .padding(horizontal = 14.dp, vertical = 7.dp)
         ) {
-            // 与报表页同源的年月（报表页是 YearMonth.from(SystemClock.today())，等价于系统时钟）；
-            // 账簿页没有 ViewModel，为这一行引一个不划算。
-            val month = YearMonth.now()
             Text("${month.year} 年 ${month.monthValue} 月", style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.5.sp), color = p.ink2)
         }
     }
@@ -139,7 +133,7 @@ private fun Modifier.doubleRule(bottom: Boolean, color: Color): Modifier = drawB
 }
 
 @Composable
-private fun BalanceTable() {
+private fun BalanceTable(ui: LedgerBookUiState) {
     val p = Art.colors
     val ruleColor = if (p.dark) p.accent else p.ink
     Column(Modifier.horizontalScroll(rememberScrollState())) {
@@ -158,13 +152,31 @@ private fun BalanceTable() {
                 TCell("贷方发生", Modifier.weight(1f), TextAlign.End, head = true)
                 TCell("期末余额", Modifier.weight(1f), TextAlign.End, head = true)
             }
-            GroupRow("资产类")
-            assetRows.forEach { DataRow(it) }
-            SubtotalRow("资产小计", "44,600.00", "32,300.00", "11,452.94", "65,447.06")
-            GroupRow("支出类")
-            expenseRows.forEach { DataRow(it) }
-            GroupRow("收入类")
-            incomeRows.forEach { DataRow(it) }
+            if (ui.assetRows.isNotEmpty()) {
+                GroupRow("资产类")
+                ui.assetRows.forEach { DataRow(it) }
+                SubtotalRow("资产小计", ui.assetRows)
+            }
+            if (ui.liabilityRows.isNotEmpty()) {
+                GroupRow("负债类")
+                ui.liabilityRows.forEach { DataRow(it) }
+                SubtotalRow("负债小计", ui.liabilityRows)
+            }
+            if (ui.expenseRows.isNotEmpty()) {
+                GroupRow("支出类")
+                ui.expenseRows.forEach { DataRow(it) }
+                SubtotalRow("支出小计", ui.expenseRows)
+            }
+            if (ui.incomeRows.isNotEmpty()) {
+                GroupRow("收入类")
+                ui.incomeRows.forEach { DataRow(it) }
+                SubtotalRow("收入小计", ui.incomeRows)
+            }
+            if (ui.equityRows.isNotEmpty()) {
+                GroupRow("权益类")
+                ui.equityRows.forEach { DataRow(it) }
+                SubtotalRow("权益小计", ui.equityRows)
+            }
             // 合计
             Row(
                 Modifier
@@ -174,10 +186,21 @@ private fun BalanceTable() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TCell("合计", Modifier.weight(1.5f), TextAlign.Start, bold = true)
-                TCell("44,600.00", Modifier.weight(1f), TextAlign.End, num = true, bold = true)
-                TCell("43,752.94", Modifier.weight(1f), TextAlign.End, num = true, bold = true)
-                TCell("35,752.94", Modifier.weight(1f), TextAlign.End, num = true, bold = true)
                 TCell("—", Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+                TCell(fmt(ui.totalDebitMinor), Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+                TCell(fmt(ui.totalCreditMinor), Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+                TCell("—", Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+            }
+            // 借贷不平是账做坏了，必须照实暴露，不许四舍五入糊过去
+            if (ui.isUnbalanced) {
+                val gap = ui.totalDebitMinor - ui.totalCreditMinor
+                Text(
+                    "借贷不平：借方 ${fmt(ui.totalDebitMinor)}，贷方 ${fmt(ui.totalCreditMinor)}，" +
+                        "差额 ${fmt(gap)}（借方为正）",
+                    modifier = Modifier.padding(start = 6.dp, top = 8.dp),
+                    style = TextStyle(fontSize = 11.5.sp, fontFamily = Art.type.body),
+                    color = p.accent,
+                )
             }
         }
     }
@@ -230,7 +253,7 @@ private fun GroupRow(name: String) {
 }
 
 @Composable
-private fun DataRow(r: BalRow) {
+private fun DataRow(r: BalanceRowUi) {
     val p = Art.colors
     Column {
         Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -239,30 +262,34 @@ private fun DataRow(r: BalRow) {
                 Spacer(Modifier.width(10.dp))
                 Text(r.name, style = TextStyle(fontSize = 13.sp, fontFamily = Art.type.body), color = p.ink)
             }
-            TCell(r.open, Modifier.weight(1f), TextAlign.End, num = true, faint = r.open == "—")
-            TCell(r.debit, Modifier.weight(1f), TextAlign.End, num = true, faint = r.debit == "—")
-            TCell(r.credit, Modifier.weight(1f), TextAlign.End, num = true, faint = r.credit == "—")
-            TCell(r.close, Modifier.weight(1f), TextAlign.End, num = true)
+            TCell(fmtOrDash(r.openingMinor), Modifier.weight(1f), TextAlign.End, num = true, faint = r.openingMinor == 0L)
+            TCell(fmtOrDash(r.debitMinor), Modifier.weight(1f), TextAlign.End, num = true, faint = r.debitMinor == 0L)
+            TCell(fmtOrDash(r.creditMinor), Modifier.weight(1f), TextAlign.End, num = true, faint = r.creditMinor == 0L)
+            TCell(fmtOrDash(r.closingMinor), Modifier.weight(1f), TextAlign.End, num = true)
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
     }
 }
 
 @Composable
-private fun SubtotalRow(name: String, open: String, debit: String, credit: String, close: String) {
+private fun SubtotalRow(name: String, rows: List<BalanceRowUi>) {
+    val opening = rows.sumOf { it.openingMinor }
+    val debit = rows.sumOf { it.debitMinor }
+    val credit = rows.sumOf { it.creditMinor }
+    val closing = rows.sumOf { it.closingMinor }
     Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         TCell(name, Modifier.weight(1.5f), TextAlign.Start, bold = true)
-        TCell(open, Modifier.weight(1f), TextAlign.End, num = true, bold = true)
-        TCell(debit, Modifier.weight(1f), TextAlign.End, num = true, bold = true)
-        TCell(credit, Modifier.weight(1f), TextAlign.End, num = true, bold = true)
-        TCell(close, Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+        TCell(fmtOrDash(opening), Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+        TCell(fmtOrDash(debit), Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+        TCell(fmtOrDash(credit), Modifier.weight(1f), TextAlign.End, num = true, bold = true)
+        TCell(fmtOrDash(closing), Modifier.weight(1f), TextAlign.End, num = true, bold = true)
     }
 }
 
 /* ---------------- 凭证 ---------------- */
 
 @Composable
-private fun VoucherCard(v: Voucher) {
+private fun VoucherCard(v: VoucherUi) {
     val p = Art.colors
     Row(
         Modifier
@@ -286,12 +313,17 @@ private fun VoucherCard(v: Voucher) {
                     style = TextStyle(fontFamily = Art.type.display, fontWeight = FontWeight.SemiBold, fontSize = 14.5.sp, letterSpacing = 1.sp),
                     color = p.ink
                 )
-                Text(v.date, style = TextStyle(fontSize = 11.5.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"), color = p.ink3)
+                Text(v.dateText, style = TextStyle(fontSize = 11.5.sp, fontFamily = Art.type.num, fontFeatureSettings = "tnum"), color = p.ink3)
             }
             Spacer(Modifier.height(12.dp))
-            VLine("借：${v.debit}", v.debitAmt, indent = false)
-            Spacer(Modifier.height(4.dp))
-            VLine("贷：${v.credit}", v.creditAmt, indent = true)
+            v.lines.forEachIndexed { index, line ->
+                if (index > 0) Spacer(Modifier.height(4.dp))
+                VLine(
+                    text = (if (line.isDebit) "借：" else "贷：") + line.accountLabel,
+                    amount = fmt(line.amountMinor),
+                    indent = !line.isDebit,
+                )
+            }
             Spacer(Modifier.height(12.dp))
             // 虚线分隔
             Box(

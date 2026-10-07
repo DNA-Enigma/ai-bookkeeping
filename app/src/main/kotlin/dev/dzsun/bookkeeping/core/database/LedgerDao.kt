@@ -111,6 +111,39 @@ interface JournalDao {
     fun observeLedgerRows(): Flow<List<LedgerRow>>
 
     /**
+     * 某月的凭证明细：该月每张 `journal` 的**全部** `posting`（借贷双方都要，
+     * 凭证要展示分录对），按日期倒序；同一天新录入的在前，与 [observeLedgerRows] 一致。
+     *
+     * 一张凭证多条分录会返回多行，消费方按 [VoucherLine.journalId] 分组。
+     * 这里按 `p.amountMinor` 把借方（正）排在贷方（负）前面，分组后直接顺序渲染即可。
+     */
+    @Query(
+        """
+        SELECT j.id AS journalId,
+               j.dateEpochDay AS dateEpochDay,
+               j.payee AS payee,
+               j.note AS note,
+               j.status AS status,
+               j.source AS source,
+               j.place AS place,
+               p.id AS postingId,
+               p.accountId AS accountId,
+               a.name AS accountName,
+               a.type AS accountType,
+               p.amountMinor AS amountMinor,
+               p.currency AS currency
+        FROM journal j
+        JOIN posting p ON p.journalId = j.id
+        JOIN account a ON a.id = p.accountId
+        WHERE j.dateEpochDay BETWEEN :fromEpochDay AND :toEpochDay
+          AND j.status != 'VOID'
+        ORDER BY j.dateEpochDay DESC, j.createdAt DESC,
+                 CASE WHEN p.amountMinor > 0 THEN 0 ELSE 1 END
+        """,
+    )
+    fun observeVoucherLines(fromEpochDay: Long, toEpochDay: Long): Flow<List<VoucherLine>>
+
+    /**
      * 按外部流水号找已导入过的那一笔。
      *
      * 这是**重复导入同一份文件**的幂等依据：单号已存在就跳过，
@@ -280,6 +313,53 @@ data class MonthlyTotal(
     val amountMinor: Long,
 )
 
+/**
+ * 某个科目在某个月的余额试算行。
+ *
+ * **金额一律整数最小单位**，与账本其余部分同一口径。
+ * [openingNetMinor] 与净额口径是**借方为正、贷方为负**——所以收入科目的期初
+ * 在库里是负数，展示时按 [accountType] 的余额方向翻正。
+ *
+ * 与 [LedgerRow] 的关键区别：那个只投影收支一侧（`a.type IN ('EXPENSE', 'INCOME')`），
+ * 算不了资产/负债侧的余额；这里把 `posting` 全方向纳入，才能做复式试算。
+ */
+data class AccountPeriodBalance(
+    val accountId: String,
+    val accountName: String,
+    val accountType: AccountType,
+    val sortOrder: Int,
+    /** 期初净额（借方为正）。取该月首日之前的全部分录之和。 */
+    val openingNetMinor: Long,
+    /** 本期借方合计。 */
+    val debitMinor: Long,
+    /** 本期贷方合计。 */
+    val creditMinor: Long,
+)
+
+/**
+ * 凭证的一条分录行。借贷双方都在内——凭证要展示完整的分录对，
+ * 只取一侧就看不出「有借必有贷」。
+ *
+ * 一张凭证有多条分录时会返回多行，消费方按 [journalId] 分组。
+ * 分组在调用方做是因为这只是展示结构，不是聚合——月度过滤与连接都已经在 SQL 里完成了。
+ */
+data class VoucherLine(
+    val journalId: String,
+    val dateEpochDay: Long,
+    val payee: String?,
+    val note: String?,
+    val status: JournalStatus,
+    val source: JournalSource,
+    val place: String?,
+    val postingId: String,
+    val accountId: String,
+    val accountName: String,
+    val accountType: AccountType,
+    /** 借方为正、贷方为负，与 [PostingEntity.amountMinor] 同一符号约定。 */
+    val amountMinor: Long,
+    val currency: String,
+)
+
 @Dao
 interface PostingDao {
 
@@ -405,4 +485,40 @@ interface PostingDao {
         """,
     )
     fun observeMonthlyTotals(fromEpochDay: Long, toEpochDay: Long): Flow<List<MonthlyTotal>>
+
+    /**
+     * 按科目聚合的余额试算：期初净额 + 本期借方合计 + 本期贷方合计。
+     *
+     * **聚合在 SQL 里做**（同上）：一次查询、按科目分组，不把整本账目拉进内存再筛。
+     * 全方向纳入 `posting`（不止收支侧）——这是 [LedgerRow] 做不了的事，
+     * 资产/负债侧的余额只在这张投影里有。
+     *
+     * 符号约定与 [PostingEntity.amountMinor] 一致：**借方为正、贷方为负**。
+     * 借方合计取正分录之和，贷方合计取负分录绝对值之和，所以一张平的凭证
+     * 对两个合计的贡献相等；整月下来「本期借方合计 = 本期贷方合计」。
+     *
+     * 只返回有分录的科目（没记过账的科目余额为零，不该在试算表上占一行）。
+     * 排除 `VOID`——作废的账不该进试算。
+     */
+    @Query(
+        """
+        SELECT p.accountId AS accountId,
+               a.name AS accountName,
+               a.type AS accountType,
+               a.sortOrder AS sortOrder,
+               SUM(CASE WHEN j.dateEpochDay < :fromEpochDay THEN p.amountMinor ELSE 0 END) AS openingNetMinor,
+               SUM(CASE WHEN j.dateEpochDay BETWEEN :fromEpochDay AND :toEpochDay AND p.amountMinor > 0
+                        THEN p.amountMinor ELSE 0 END) AS debitMinor,
+               SUM(CASE WHEN j.dateEpochDay BETWEEN :fromEpochDay AND :toEpochDay AND p.amountMinor < 0
+                        THEN -p.amountMinor ELSE 0 END) AS creditMinor
+        FROM posting p
+        JOIN account a ON a.id = p.accountId
+        JOIN journal j ON j.id = p.journalId
+        WHERE j.status != 'VOID'
+          AND j.dateEpochDay <= :toEpochDay
+        GROUP BY p.accountId, a.name, a.type, a.sortOrder
+        ORDER BY a.sortOrder, a.name
+        """,
+    )
+    fun observeAccountPeriodBalances(fromEpochDay: Long, toEpochDay: Long): Flow<List<AccountPeriodBalance>>
 }

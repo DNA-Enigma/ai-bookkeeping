@@ -2,6 +2,7 @@ package dev.dzsun.bookkeeping.core.ledger
 
 import androidx.room.withTransaction
 import dev.dzsun.bookkeeping.core.database.AccountEntity
+import dev.dzsun.bookkeeping.core.database.AccountPeriodBalance
 import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.database.BudgetEntity
 import dev.dzsun.bookkeeping.core.database.CategoryTotal
@@ -12,6 +13,7 @@ import dev.dzsun.bookkeeping.core.database.LedgerDatabase
 import dev.dzsun.bookkeeping.core.database.LedgerRow
 import dev.dzsun.bookkeeping.core.database.MonthlyTotal
 import dev.dzsun.bookkeeping.core.database.PostingEntity
+import dev.dzsun.bookkeeping.core.database.VoucherLine
 import dev.dzsun.bookkeeping.core.money.Money
 import java.time.LocalDate
 import dev.dzsun.bookkeeping.core.platform.Clock
@@ -78,6 +80,30 @@ class LedgerRepository @Inject constructor(
      */
     fun observeMonthlyTotals(from: java.time.LocalDate, to: java.time.LocalDate): Flow<List<MonthlyTotal>> =
         database.postingDao().observeMonthlyTotals(from.toEpochDay(), to.toEpochDay())
+
+    /**
+     * 某月的科目余额试算：每科目的期初净额 + 本期借贷合计。
+     *
+     * **聚合在 SQL 里做**，全方向纳入 `posting`（不止收支侧）——
+     * `observeEntries()` 只投影收支那一侧，算不了资产/负债余额。
+     * 日期窗口由 [MonthlyReportQuery.window] 算（含闰年二月、12 月翻年）。
+     */
+    fun observeAccountBalances(yearMonth: java.time.YearMonth): Flow<List<AccountPeriodBalance>> {
+        val window = MonthlyReportQuery.window(yearMonth)
+        return database.postingDao()
+            .observeAccountPeriodBalances(window.fromEpochDay, window.toEpochDay)
+    }
+
+    /**
+     * 某月的凭证明细行：该月每张凭证的全部分录（借贷双方）。
+     *
+     * 一张凭证多条分录返回多行，消费方按 [VoucherLine.journalId] 分组。
+     * 过滤在 SQL 里做，不拉全表再筛。
+     */
+    fun observeVoucherLines(yearMonth: java.time.YearMonth): Flow<List<VoucherLine>> {
+        val window = MonthlyReportQuery.window(yearMonth)
+        return database.journalDao().observeVoucherLines(window.fromEpochDay, window.toEpochDay)
+    }
 
     /**
      * 某个月的报表聚合：收入、支出、支出侧分类合计、上月支出。
