@@ -18,3 +18,9 @@ captures/
 # tools/ 下 Python 校验脚本的字节码缓存
 __pycache__/
 *.pyc
+
+# 发布签名材料 —— 整个目录都不进 git，丢了只能换签名（见 keystore/README.txt）
+keystore/
+
+# mimo 工作区临时文件
+.mimocode/
