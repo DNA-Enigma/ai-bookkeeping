@@ -6,9 +6,9 @@ import dev.dzsun.bookkeeping.core.database.AccountType
 /**
  * 一次导入里冒出来的、**用户从没归过类**的商户。
  *
- * 判据是 [PlannedEntry.categoryFromHistory]：为 false 表示这一行落到了兜底分类
- * （「其他支出」/「其他收入」），而不是按用户自己的历史归的类。流水本身不带分类，
- * 所以「陌生」的定义只能是「本机历史里查不到」。
+ * 判据是 [PlannedEntry.categoryFromHistory] 与 [PlannedEntry.categoryFromStatement]
+ * **都为 false**——即这一行落到了兜底分类（「其他支出」/「其他收入」），既不是用户
+ * 历史归的类，也不是账单自带的「交易分类」给的。
  */
 data class UnknownMerchant(
     val payee: String,
@@ -85,6 +85,10 @@ object UnavailableMerchantCategorizer : MerchantCategorizer {
  * 只看 [ImportPlan.entries]——那是**真正会入库**的行。疑似重复的默认不导入，
  * 拿它们的商户去归类，等于为一批不在账本里的行花钱调模型。
  *
+ * **账单自带的「交易分类」已经给出分类的行不算陌生**：那些行落到的是账单
+ * 明写的分类（如「餐饮美食」→餐饮），不是兜底。把它们再送去让模型猜一遍，
+ * 只会拿一个可能更差的建议覆盖账单给的好分类。
+ *
  * 同一商户出现多次只出一条。商户若在收支两个方向都出现过，取**第一次**出现的方向：
  * 同一个对手方既收又支是常见情形（退款、报销），逐方向拆成两条建议反而更难选。
  */
@@ -92,6 +96,7 @@ fun ImportPlan.unknownMerchants(): List<UnknownMerchant> {
     val byPayee = LinkedHashMap<String, UnknownMerchant>()
     for (entry in entries) {
         if (entry.categoryFromHistory) continue
+        if (entry.categoryFromStatement) continue
         val payee = entry.row.merchant?.trim().orEmpty()
         if (payee.isEmpty()) continue
         val seen = byPayee[payee]

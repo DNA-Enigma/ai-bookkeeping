@@ -1,5 +1,6 @@
 package dev.dzsun.bookkeeping.core.statement
 
+import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.database.DuplicateCandidate
 import dev.dzsun.bookkeeping.core.database.JournalEntity
@@ -49,6 +50,8 @@ sealed interface ImportPreparation {
  * 待导入的一行，**已解析出分类**。
  *
  * [categoryFromHistory] 为 true 表示分类来自用户自己以前的归类，不是猜的。
+ * [categoryFromStatement] 为 true 表示分类来自账单自带的「交易分类」列——
+ * 它是账单给的、不是我们猜的，但**也不是用户核对过的**，所以两者都要与兜底区分。
  */
 data class PlannedEntry(
     val row: StatementRow,
@@ -59,6 +62,8 @@ data class PlannedEntry(
     val categoryFromHistory: Boolean,
     /** 可能与它重复的既有账目。非空时**默认不导入**，交用户决定。 */
     val duplicateCandidates: List<DuplicateCandidate>,
+    /** 分类来自账单自带的「交易分类」列（见 [matchStatementCategory]）。 */
+    val categoryFromStatement: Boolean = false,
 ) {
     /** 流水里的「商品」当作明细——它正是「几周后想起买了什么」要用的那行字。 */
     val items: List<ItemDraft>
@@ -172,6 +177,7 @@ private sealed interface ParseAttempt {
 class StatementImporter @Inject constructor(
     private val repository: LedgerRepository,
     private val catalog: StatementFormatCatalog,
+    private val categoryCatalog: StatementCategoryCatalog,
 ) {
 
     /** 解析并分析，**不落库**。 */
@@ -228,6 +234,13 @@ class StatementImporter @Inject constructor(
         val reversals = mutableListOf<PlannedReversal>()
         var alreadyImported = 0
 
+        // 分类账户与映射规则整批读一次。逐行查会在一份几百行的账单上重复几百次，
+        // 而且中途不会变——科目表和 assets 都不在这次导入里被修改。
+        val categories = repository.accountsOfTypes(
+            listOf(AccountType.EXPENSE, AccountType.INCOME),
+        )
+        val categoryRules = categoryCatalog.rules()
+
         for (row in parsed.consumptionRows) {
             val existing = repository.findImported(row.externalSource, row.externalRef)
             if (existing != null) {
@@ -243,7 +256,7 @@ class StatementImporter @Inject constructor(
                 continue
             }
 
-            val planned = planEntry(row, request)
+            val planned = planEntry(row, request, categories, categoryRules)
             if (planned.duplicateCandidates.isEmpty()) {
                 entries += planned
                 // 首次导入就带着退款状态：原消费也在这一批里，冲减到落库时才连得上它。
@@ -355,7 +368,15 @@ class StatementImporter @Inject constructor(
         return ""
     }
 
-    private suspend fun planEntry(row: StatementRow, request: ImportRequest): PlannedEntry {
+    private suspend fun planEntry(
+        row: StatementRow,
+        request: ImportRequest,
+        categories: List<AccountEntity>,
+        categoryRules: List<StatementCategoryRule>,
+    ): PlannedEntry {
+        // 三档取值，一级拿不到才降级：用户历史 > 账单自带的「交易分类」 > 兜底。
+        // 历史最可信，所以排在最前；账单的分类虽然是账单给的，但用户没核对过，
+        // 所以既不算"按历史"，也不能因此就跳过核对。
         val remembered = row.merchant?.let { repository.categoryForMerchant(it) }
         val fallback = when (row.direction) {
             StatementDirection.EXPENSE -> request.fallbackExpenseCategoryId
@@ -363,8 +384,16 @@ class StatementImporter @Inject constructor(
             // 不计收支的行在解析阶段就被判成 NotConsumption，走不到这里
             StatementDirection.NEUTRAL -> error("不计收支的行不该进入入账计划（第 ${row.rowNumber} 行）")
         }
-        val categoryId = remembered ?: fallback
-        val name = repository.accountName(categoryId).orEmpty()
+
+        val fromHistory = categories.firstOrNull { it.id == remembered }
+        val fromStatement = if (fromHistory == null) {
+            matchStatementCategory(row.rawType, row.direction, categoryRules, categories)
+        } else {
+            null
+        }
+        val choice = fromHistory ?: fromStatement ?: categories.firstOrNull { it.id == fallback }
+        val categoryId = choice?.id ?: fallback
+        val name = choice?.name ?: repository.accountName(categoryId).orEmpty()
 
         val candidates = repository.findDuplicateCandidates(
             categorySideAmount = row.amount,
@@ -376,8 +405,9 @@ class StatementImporter @Inject constructor(
             accountId = request.accountId,
             categoryId = categoryId,
             categoryName = name,
-            categoryFromHistory = remembered != null,
+            categoryFromHistory = fromHistory != null,
             duplicateCandidates = candidates,
+            categoryFromStatement = fromStatement != null,
         )
     }
 

@@ -37,6 +37,7 @@ class MerchantCategorizationTest {
     private fun planned(
         merchant: String?,
         known: Boolean = false,
+        fromStatement: Boolean = false,
         direction: StatementDirection = StatementDirection.EXPENSE,
         rowNumber: Int = 1,
     ) = PlannedEntry(
@@ -46,6 +47,7 @@ class MerchantCategorizationTest {
         categoryName = if (known) "餐饮" else "其他支出",
         categoryFromHistory = known,
         duplicateCandidates = emptyList(),
+        categoryFromStatement = fromStatement,
     )
 
     private fun plan(
@@ -111,6 +113,19 @@ class MerchantCategorizationTest {
             ),
         ).unknownMerchants()
         assertTrue(found.isEmpty())
+    }
+
+    @Test
+    fun `账单自带分类的行不算陌生商户`() {
+        // 账单的「交易分类」已经给出分类（如「餐饮美食」→餐饮），不是兜底，
+        // 不该再让模型猜一遍覆盖它
+        val found = plan(
+            entries = listOf(
+                planned("星巴克", fromStatement = true, rowNumber = 1),
+                planned("滴滴出行", rowNumber = 2),
+            ),
+        ).unknownMerchants()
+        assertEquals(listOf("滴滴出行"), found.map { it.payee })
     }
 
     @Test
