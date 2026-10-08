@@ -145,4 +145,32 @@ class StatementImporterMappingTest {
         )
         assertEquals("飞", draft.payee)
     }
+
+    // —— 明细（详情页「买了什么」）与摘要同一口径 ——
+
+    @Test
+    fun `商户截断且描述是平台话术时_明细也写成交易分类`() {
+        // 只改标题和摘要会让详情页仍写着「收钱码收款」——同一个事实三个地方要一致
+        val draft = toJournalDraft(
+            entry(row(merchant = "飞", description = "收钱码收款", rawType = "餐饮美食")),
+        )
+        assertEquals(listOf("餐饮美食"), draft.items.map { it.description })
+    }
+
+    @Test
+    fun `商户有信息时明细仍是商品说明_不许被分类顶掉`() {
+        // ⚠️ 这条最不能误伤：商户名有信息量，描述是泛化话术也照旧用它
+        val draft = toJournalDraft(
+            entry(row(merchant = "小东北麻辣烫", description = "收钱码收款", rawType = "餐饮美食")),
+        )
+        assertEquals(listOf("收钱码收款"), draft.items.map { it.description })
+    }
+
+    @Test
+    fun `描述本身有信息时明细照旧是原描述`() {
+        val draft = toJournalDraft(
+            entry(row(merchant = "哈啰出行", description = "哈啰单车卡抵扣骑行费用", rawType = "交通出行")),
+        )
+        assertEquals(listOf("哈啰单车卡抵扣骑行费用"), draft.items.map { it.description })
+    }
 }

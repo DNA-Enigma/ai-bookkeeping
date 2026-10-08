@@ -86,4 +86,17 @@ object StatementLabeling {
         if (!isUninformativeDescription(description)) return null
         return rawType?.trim()?.takeIf { it.isNotEmpty() }
     }
+
+    /**
+     * 这行在账本里的名字：能让「交易分类」顶上时用它，否则退回商品说明。
+     *
+     * **预览标题、落库摘要、明细三处走的都是这一个口径。** 同一个事实在三个地方
+     * 各写各的判据，迟早漂成三种说法——用户点进详情看到「收钱码收款」、
+     * 而列表标题写着「餐饮美食」，只会更糊涂。
+     *
+     * 空描述返回 null：空明细行会被 `JournalDraft` 拒绝，对「想起买了什么」也无用。
+     */
+    fun rowLabel(merchant: String?, description: String?, rawType: String?): String? =
+        statementTypeName(merchant, description, rawType)
+            ?: description?.trim()?.takeIf { it.isNotEmpty() }
 }

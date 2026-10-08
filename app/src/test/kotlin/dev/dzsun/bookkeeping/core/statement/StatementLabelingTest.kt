@@ -136,4 +136,34 @@ class StatementLabelingTest {
             StatementLabeling.statementTypeName("/", "花呗主动还款-2026年10月账单", "信用借还"),
         )
     }
+
+    // —— 这行在账本里的名字：预览标题 / 摘要 / 明细共用一个口径 ——
+
+    @Test
+    fun `交易分类能顶上时就用它`() {
+        assertEquals("餐饮美食", StatementLabeling.rowLabel("飞", "收钱码收款", "餐饮美食"))
+    }
+
+    @Test
+    fun `用不上交易分类时退回商品说明`() {
+        // 商户名有信息量（小东北麻辣烫）或描述本身有信息（哈啰单车卡…）都不该退到分类
+        assertEquals("收钱码收款", StatementLabeling.rowLabel("小东北麻辣烫", "收钱码收款", "餐饮美食"))
+        assertEquals(
+            "哈啰单车卡抵扣骑行费用",
+            StatementLabeling.rowLabel("哈啰出行", "哈啰单车卡抵扣骑行费用", "交通出行"),
+        )
+    }
+
+    @Test
+    fun `没有商品说明时返回空而不是空串`() {
+        // 空明细行会被 JournalDraft 拒绝——「想起买了什么」用不上一个空串
+        assertNull(StatementLabeling.rowLabel("星巴克咖啡", null, "商户消费"))
+        assertNull(StatementLabeling.rowLabel("星巴克咖啡", "   ", "商户消费"))
+    }
+
+    @Test
+    fun `商户没信息又没商品说明时_退回交易分类而不是空`() {
+        // 空描述比话术更容易被漏掉：这时「交易分类」是唯一还有信息量的东西
+        assertEquals("餐饮美食", StatementLabeling.rowLabel("飞", null, "餐饮美食"))
+    }
 }
