@@ -59,6 +59,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dzsun.bookkeeping.core.designsystem.*
 import dev.dzsun.bookkeeping.feature.ask.AskStage
 import dev.dzsun.bookkeeping.feature.ask.AskViewModel
+import dev.dzsun.bookkeeping.feature.entry.AddEntryViewModel
+import java.time.LocalDate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -66,25 +68,33 @@ import kotlinx.coroutines.launch
  * ============================================================
  *  AI 对话页（集成版）
  *  消息路由（三段，不许互相顶替）：
- *   1. 省钱建议类   → 本地建言（TODO 接 feature/discover 的 Advisor）
- *   2. 含金额的话   → 本地解析卡（TODO 换 feature/entry 的 AiParser，
- *                     确认后走 AddEntryViewModel 入账）
+ *   1. 省钱建议类   → 不编数字，引导用户问真实账目
+ *   2. 含金额的话   → 本地解析卡；「确认入账」走 AddEntryViewModel.saveQuickEntry
+ *                     真落库（同一条 JournalDraft 路径），失败如实说没入账
  *   3. 其他问账     → AskViewModel：调度层翻译 → 本机 Room 聚合 →
  *                     中文答案。账目不出设备，这条链路是现成的。
  * ============================================================
  */
 
-data class ParsedEntry(val category: String, val note: String, val amount: Double)
+/**
+ * 对话里解析出的一张待确认卡片。
+ *
+ * [amountText] 是用户原样的数字串（如 "35" / "12.50"）——**刻意不用 Double**：
+ * 金额在账本里一律整数最小单位，任何一处浮点都可能把 12.50 变成 12.499…。
+ */
+data class ParsedEntry(val category: String, val note: String, val amountText: String)
 
 sealed class ChatMsg {
     data class Text(val fromAgent: Boolean, val body: String) : ChatMsg()
-    data class EntryCard(val entry: ParsedEntry) : ChatMsg()
+    /** [raw] 是用户原话，「修改」时回填输入框用。 */
+    data class EntryCard(val entry: ParsedEntry, val raw: String) : ChatMsg()
 }
 
 @Composable
 fun ChatScreen(
     onClose: () -> Unit,
     viewModel: AskViewModel = hiltViewModel(),
+    addEntryViewModel: AddEntryViewModel = hiltViewModel(),
 ) {
     val p = Art.colors
     val scope = rememberCoroutineScope()
@@ -135,7 +145,7 @@ fun ChatScreen(
         }
     }
 
-    fun entryParse(raw: String, amount: Double) {
+    fun entryParse(raw: String, amountText: String) {
         scope.launch {
             typing = true; scroll()
             delay(900)
@@ -143,7 +153,30 @@ fun ChatScreen(
             val cat = guessCategory(raw)
             val note = raw.replace(Regex("[，,]?\\s*\\d+(?:\\.\\d+)?\\s*"), "")
                 .replace(Regex("花了|花|了"), "").trim().ifEmpty { "未备注" }
-            messages += ChatMsg.EntryCard(ParsedEntry(cat, note, amount)); scroll()
+            messages += ChatMsg.EntryCard(ParsedEntry(cat, note, amountText), raw); scroll()
+        }
+    }
+
+    /**
+     * 对话里「确认入账」：交给 [AddEntryViewModel.saveQuickEntry] 真写库。
+     * 成功、失败各说各话——**没写进去却说「记好了」是最伤信任的一种 bug**。
+     */
+    fun confirmEntry(card: ChatMsg.EntryCard) {
+        addEntryViewModel.saveQuickEntry(
+            amountText = card.entry.amountText,
+            categoryName = card.entry.category,
+            note = card.entry.note,
+            dateEpochDay = LocalDate.now().toEpochDay(),
+        ) { ok ->
+            if (ok) {
+                agentSay("已入账。可在首页流水中查看。\n还有别的要记吗？", 700)
+            } else {
+                agentSay(
+                    "这笔没能入账（账户或分类还没准备好）。\n" +
+                        "点中央「＋」在记一笔面板里核对后再保存。",
+                    700,
+                )
+            }
         }
     }
 
@@ -151,15 +184,15 @@ fun ChatScreen(
         messages += ChatMsg.Text(false, text); scroll()
         when {
             text.contains("省") || text.contains("建议") || text.contains("存钱") ->
+                // 不编金额：省钱建议要真算就得看真实账目。先把用户引到能真答的问题上。
                 agentSay(
-                    "看了你近期的账，给你三则：\n壹 · 外卖换成自带午餐，每月约省 ¥600\n" +
-                        "贰 · 检查连续扣费的订阅，用不上的就取消\n" +
-                        "叁 · 活期闲钱转去理财，随用随取\n\n要我把第叁则的建议金额复制给你吗？",
-                    1100,
+                    "省钱这事得看你的真实账目，我不编数字。\n" +
+                        "试着问：「这个月餐饮花了多少」「哪类花得最多」，我看完再一起想办法。",
+                    900,
                 )
             Regex("\\d+(?:\\.\\d+)?").containsMatchIn(text) -> {
                 val m = Regex("\\d+(?:\\.\\d+)?").find(text)!!
-                entryParse(text, m.value.toDouble())
+                entryParse(text, m.value)
             }
             else -> {
                 // 真实问账链路：调度层 → Room → 中文答案
@@ -210,9 +243,15 @@ fun ChatScreen(
             items(messages) { msg ->
                 when (msg) {
                     is ChatMsg.Text -> TextBubble(msg.fromAgent, msg.body)
-                    is ChatMsg.EntryCard -> EntryBubble(msg.entry) { ok ->
-                        if (ok) agentSay("记好了。本月${msg.entry.category}累计已更新，可在首页流水中查看。\n还有别的要记吗？", 700)
-                    }
+                    is ChatMsg.EntryCard -> EntryBubble(
+                        entry = msg.entry,
+                        onConfirm = { confirmEntry(msg) },
+                        onEdit = {
+                            // 「修改」= 把原话回填输入框，让用户改完重发。
+                            input = msg.raw
+                            scroll()
+                        },
+                    )
                 }
             }
             if (typing) item { TypingBubble() }
@@ -305,9 +344,14 @@ private fun TextBubble(fromAgent: Boolean, body: String) {
 }
 
 @Composable
-private fun EntryBubble(entry: ParsedEntry, onDone: (Boolean) -> Unit) {
+private fun EntryBubble(
+    entry: ParsedEntry,
+    onConfirm: () -> Unit,
+    onEdit: () -> Unit,
+) {
     val p = Art.colors
-    var confirmed by remember { mutableStateOf(false) }
+    // 按过任一按钮就锁住：既不能再点「确认入账」，也不能重复点「修改」。
+    var done by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         SealBadge("账", size = 28.dp)
         Spacer(Modifier.width(10.dp))
@@ -323,7 +367,8 @@ private fun EntryBubble(entry: ParsedEntry, onDone: (Boolean) -> Unit) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.Bottom) {
                 Text("¥ ", style = TextStyle(fontFamily = Art.type.num, fontSize = 17.sp), color = p.ink2)
-                Text("%,.2f".format(entry.amount),
+                // 显示用户原样的数字串，不做浮点格式化成 %,.2f——那是账本里唯一的真值。
+                Text(entry.amountText,
                     style = TextStyle(fontFamily = Art.type.num, fontWeight = Art.type.numWeight, fontSize = 30.sp, fontFeatureSettings = "tnum"),
                     color = p.ink)
             }
@@ -340,21 +385,23 @@ private fun EntryBubble(entry: ParsedEntry, onDone: (Boolean) -> Unit) {
                 Box(
                     Modifier
                         .weight(1f)
-                        .background(when { confirmed -> p.pos; p.dark -> p.accent; else -> p.ink })
-                        .clickable(enabled = !confirmed) {
-                            confirmed = true
-                            // TODO 接 feature/entry 的 AddEntryViewModel 入账（含复式分录）
-                            onDone(true)
+                        .background(when { done -> p.pos; p.dark -> p.accent; else -> p.ink })
+                        .clickable(enabled = !done) {
+                            done = true
+                            onConfirm()
                         }
                         .padding(vertical = 13.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(if (confirmed) "已入账 ✓" else "确认入账",
+                    Text(if (done) "已提交" else "确认入账",
                         style = TextStyle(fontSize = 12.5.sp, letterSpacing = 2.sp),
-                        color = if (p.dark && !confirmed) Color(0xFF131109) else p.bg)
+                        color = if (p.dark && !done) Color(0xFF131109) else p.bg)
                 }
                 Box(
-                    Modifier.weight(1f).clickable(enabled = !confirmed) { onDone(false) }.padding(vertical = 13.dp),
+                    Modifier.weight(1f).clickable(enabled = !done) {
+                        done = true
+                        onEdit()
+                    }.padding(vertical = 13.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text("修改", style = TextStyle(fontSize = 12.5.sp, letterSpacing = 2.sp), color = p.ink2)

@@ -597,8 +597,67 @@ class AddEntryViewModel @Inject constructor(
     /** 用户点了「知道了」，或提示自己超时了。 */
     fun dismissAutoSaved() = _state.update { it.copy(autoSaved = null) }
 
-    /** 把若干张卡片落库，返回凭证 id。**确认入账与自动入账共用这一段**。 */
-    private suspend fun postCards(cards: List<DraftCard>, state: AddEntryUiState): List<String> {
+    // ---------- 对话页的快速记账 ----------
+
+    /**
+     * 对话页里「确认入账」的落库入口：一句话解析出的字段直接写成凭证。
+     *
+     * 与确认卡走**同一条** [postCards] 路径（复式平衡由 `JournalDraft` 工厂保证），
+     * 不在这里另造分录。分类按**名字**匹配科目表，对不上就用该方向的第一个——
+     * 与 [matchCategoryId] 同一口径。
+     *
+     * [onResult] `true` 表示确实写进了账本；`false` 表示没写（账户/币种/分类没准备好，
+     * 或落库失败）。调用方必须据此说人话——**一律回「记好了」是骗人**。
+     */
+    fun saveQuickEntry(
+        amountText: String,
+        categoryName: String,
+        note: String,
+        dateEpochDay: Long,
+        onResult: (Boolean) -> Unit,
+    ) {
+        val current = _state.value
+        if (current.fromAccountId.isBlank() || current.currency.isBlank()) {
+            onResult(false)
+            return
+        }
+        val pool = current.expenseCategories
+        val categoryId = pool.firstOrNull { it.name == categoryName }?.id
+            ?: pool.firstOrNull()?.id.orEmpty()
+        if (categoryId.isBlank()) {
+            onResult(false)
+            return
+        }
+        val card = DraftCard(
+            id = "chat-${current.fromAccountId}-${dateEpochDay}-${amountText.hashCode()}",
+            kind = EntryKind.EXPENSE,
+            amountText = amountText,
+            categoryId = categoryId,
+            payee = "",
+            note = note,
+            dateEpochDay = dateEpochDay,
+            confidence = null,
+        )
+        viewModelScope.launch {
+            val ok = runCatching {
+                postCards(listOf(card), current, source = JournalSource.VOICE)
+            }.isSuccess
+            onResult(ok)
+        }
+    }
+
+    /**
+     * 把若干张卡片落库，返回凭证 id。**确认入账与自动入账共用这一段**。
+     *
+     * [source] 默认取 UI 状态里的渠道；对话页的快记是**文字**输入，走 [JournalSource.VOICE]
+     * （与 [parseNow] 的文字路径同一口径），别记成 RECEIPT——「这笔是拍来的还是说来的」
+     * 决定去重时谁更可信。
+     */
+    private suspend fun postCards(
+        cards: List<DraftCard>,
+        state: AddEntryUiState,
+        source: JournalSource = state.aiSource,
+    ): List<String> {
         val accountId = state.fromAccountId
         val currency = state.currency.ifBlank { "CNY" }
         return cards.map { card ->
@@ -618,7 +677,7 @@ class AddEntryViewModel @Inject constructor(
                     categoryAccountId = categoryId,
                     payee = card.payee.ifBlank { null },
                     note = card.note.ifBlank { null },
-                    source = state.aiSource,
+                    source = source,
                 )
 
                 else -> JournalDraft.expense(
@@ -628,7 +687,7 @@ class AddEntryViewModel @Inject constructor(
                     categoryAccountId = categoryId,
                     payee = card.payee.ifBlank { null },
                     note = card.note.ifBlank { null },
-                    source = state.aiSource,
+                    source = source,
                 )
             }.copy(
                 place = card.place.trim().ifBlank { null },
