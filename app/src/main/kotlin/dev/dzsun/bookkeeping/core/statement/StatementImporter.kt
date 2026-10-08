@@ -469,6 +469,10 @@ class StatementImporter @Inject constructor(
  */
 internal fun toJournalDraft(entry: PlannedEntry): JournalDraft {
     val row = entry.row
+    // 账单两列都没说清「这是干什么的」时，摘要用账单自带的「交易分类」——
+    // 照抄「收钱码收款」等于把一句废话写进账本，用户事后翻到还是不知道买了什么。
+    val note = StatementLabeling.statementTypeName(row.merchant, row.description, row.rawType)
+        ?: row.description
     val base = when (row.direction) {
         StatementDirection.EXPENSE -> JournalDraft.expense(
             dateEpochDay = row.dateEpochDay,
@@ -476,7 +480,7 @@ internal fun toJournalDraft(entry: PlannedEntry): JournalDraft {
             fromAccountId = entry.accountId,
             categoryAccountId = entry.categoryId,
             payee = row.merchant,
-            note = row.description,
+            note = note,
             source = JournalSource.STATEMENT,
         )
 
@@ -486,7 +490,7 @@ internal fun toJournalDraft(entry: PlannedEntry): JournalDraft {
             toAccountId = entry.accountId,
             categoryAccountId = entry.categoryId,
             payee = row.merchant,
-            note = row.description,
+            note = note,
             source = JournalSource.STATEMENT,
         )
 

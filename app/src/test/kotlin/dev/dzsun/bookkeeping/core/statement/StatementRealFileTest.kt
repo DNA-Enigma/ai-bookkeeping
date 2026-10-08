@@ -86,6 +86,46 @@ class StatementRealFileTest {
         )
     }
 
+    /**
+     * 「账单两列都没说清」的行，必须都能拿到账单自带的「交易分类」兜底。
+     *
+     * 断言的是**不变式**，不是具体笔数：换一份账单、命中数变了，这两条仍然成立。
+     * 命中数只 `println` 出来供人核对——把真实账单的行数列进断言等于把隐私写进仓库。
+     */
+    @Test
+    fun `真实支付宝账单里没信息量的行都能拿交易分类兜底`() {
+        val path = System.getenv("STATEMENT_REAL_ALIPAY")
+        assumeTrue("未设 STATEMENT_REAL_ALIPAY，跳过", path != null)
+        val file = File(path!!)
+        assumeTrue("账单不存在：$path", file.isFile)
+
+        val rows = CsvStatementParser(formats).parse(file.readBytes()).consumptionRows
+        assumeTrue("应解析出消费行", rows.isNotEmpty())
+
+        var unnamed = 0
+        var overridden = 0
+        for (row in rows) {
+            val label = StatementLabeling.statementTypeName(row.merchant, row.description, row.rawType)
+            if (StatementLabeling.isUninformativeMerchant(row.merchant) &&
+                StatementLabeling.isUninformativeDescription(row.description)
+            ) {
+                unnamed++
+                // 兜底必须真的存在：账单没给分类却判成"没信息量"的话，
+                // 这行会退回行号显示，用户照样看不出是干什么的
+                assertTrue(
+                    "第 ${row.rowNumber} 行两列都没信息量，账单却没给交易分类",
+                    label != null,
+                )
+            } else if (!StatementLabeling.isUninformativeMerchant(row.merchant)) {
+                // 商户有信息量时一个字都不许改——这是最常见的一档，误伤面积最大
+                if (label != null) overridden++
+            }
+        }
+        assertEquals("商户有信息量的行不该被交易分类顶掉", 0, overridden)
+
+        println("[支付宝] 两列都没信息量、需靠交易分类兜底的行=$unnamed / 消费=${rows.size}")
+    }
+
     /** 只打印**聚合量**：笔数与分类计数，不含任何商户名、单号、金额明细。 */
     private fun report(name: String, result: ParseResult) {
         val excluded = result.verdicts.filterIsInstance<RowVerdict.NotConsumption>()

@@ -7,6 +7,7 @@ import dev.dzsun.bookkeeping.core.statement.ImportPlan
 import dev.dzsun.bookkeeping.core.statement.PlannedEntry
 import dev.dzsun.bookkeeping.core.statement.RowVerdict
 import dev.dzsun.bookkeeping.core.statement.StatementDirection
+import dev.dzsun.bookkeeping.core.statement.StatementLabeling
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -94,6 +95,8 @@ data class PreviewRow(
     val amountMinor: Long,
     val merchant: String?,
     val description: String?,
+    /** 账单自带的「交易分类」列（如「餐饮美食」）。两列都没信息时用它当标题。 */
+    val rawType: String?,
     val categoryName: String?,
     val categoryFromHistory: Boolean,
     /** 为什么被跳过/排除；待导入的行是 null。 */
@@ -125,27 +128,26 @@ const val LABEL_WILL_SKIP = "将跳过"
 data class PreviewTitle(val primary: String, val secondary: String?)
 
 /**
- * 商户名短于这个长度就当作**被截断的名字**。
- *
- * 真机实测：支付宝把个人收钱码的对方名截断成 1–2 字（596 笔里 27 笔 ≤2 字），
- * 这种名字没有信息量，做主标题只会把有用的商品说明挤掉。
- */
-const val PREVIEW_SHORT_MERCHANT_LENGTH = 2
-
-/**
  * 预览行的标题怎么取。
  *
- * 两条规则，对商户名是否"有信息量"分别处理：
- * - 商户够长（≥3 字）：商户做标题，**商品说明降为副标题**——它正是「买了什么」的来源，不能丢；
- * - 商户是被截断的名字（≤2 字）：用商品说明做标题，截断名降为副标题。
+ * 三条规则，按「这行还剩多少信息」依次降级：
+ * - 商户有信息量：商户做标题，**商品说明降为副标题**——它正是「买了什么」的来源，不能丢；
+ * - 商户没有信息量（被截断成 1–2 字等）：商品说明做标题，截断名降为副标题；
+ * - **两列都没有信息量**（如「飞」+「收钱码收款」）：用账单自带的「交易分类」
+ *   （「餐饮美食」）做标题，见 [StatementLabeling.statementTypeName]。
+ *   这两列都说了等于没说，摆出来只会占地方。
  *
  * 抽成纯函数是为了能测——取错了不会报错，只会让用户对着一个孤零零的「飞」
- * 不知道这是哪笔钱。
+ * 或者一句「收钱码收款」不知道这是哪笔钱。
  */
 fun previewTitle(row: PreviewRow): PreviewTitle {
     val merchant = row.merchant?.trim().orEmpty()
     val description = row.description?.trim().orEmpty()
-    val merchantInformative = merchant.length > PREVIEW_SHORT_MERCHANT_LENGTH
+
+    StatementLabeling.statementTypeName(merchant, description, row.rawType)
+        ?.let { return PreviewTitle(it, null) }
+
+    val merchantInformative = !StatementLabeling.isUninformativeMerchant(merchant)
     return when {
         merchantInformative ->
             PreviewTitle(merchant, description.takeIf { it.isNotEmpty() && it != merchant })
@@ -183,6 +185,7 @@ fun ImportPlan.toPreviewRows(): List<PreviewRow> = buildList {
                 amountMinor = row.amount.amountMinor,
                 merchant = row.merchant,
                 description = row.description,
+                rawType = row.rawType,
                 categoryName = null,
                 categoryFromHistory = false,
                 skipReason = "状态变化 · 需单独处理",
@@ -200,6 +203,7 @@ fun ImportPlan.toPreviewRows(): List<PreviewRow> = buildList {
                 amountMinor = row.amount.amountMinor,
                 merchant = row.merchant,
                 description = row.description,
+                rawType = row.rawType,
                 categoryName = null,
                 categoryFromHistory = false,
                 skipReason = v.reason,
@@ -216,6 +220,7 @@ fun ImportPlan.toPreviewRows(): List<PreviewRow> = buildList {
                 amountMinor = 0L,
                 merchant = null,
                 description = null,
+                rawType = null,
                 categoryName = null,
                 categoryFromHistory = false,
                 skipReason = v.reason,
@@ -236,6 +241,7 @@ private fun PlannedEntry.toPreviewRow(
     amountMinor = row.amount.amountMinor,
     merchant = row.merchant,
     description = row.description,
+    rawType = row.rawType,
     categoryName = categoryName,
     categoryFromHistory = categoryFromHistory,
     skipReason = skipReason,

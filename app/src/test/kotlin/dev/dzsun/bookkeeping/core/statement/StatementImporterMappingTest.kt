@@ -22,6 +22,7 @@ class StatementImporterMappingTest {
         description: String? = "拿铁 大杯",
         merchant: String? = "星巴克咖啡",
         status: String? = "支付成功",
+        rawType: String? = "商户消费",
     ) = StatementRow(
         externalSource = "wechat",
         externalRef = "4200002319202609151234567890",
@@ -31,7 +32,7 @@ class StatementImporterMappingTest {
         merchant = merchant,
         description = description,
         status = status,
-        rawType = "商户消费",
+        rawType = rawType,
         rawTime = "2026-09-15 08:12:33",
         rowNumber = 5,
     )
@@ -114,5 +115,34 @@ class StatementImporterMappingTest {
         val draft = toJournalDraft(entry(row()))
         assertEquals("星巴克咖啡", draft.payee)
         assertEquals("拿铁 大杯", draft.note)
+    }
+
+    // —— 账单两列都没说清时，摘要用账单自带的「交易分类」 ——
+
+    @Test
+    fun `商户截断且描述是平台话术时_摘要写成交易分类`() {
+        // 实测：交易分类=餐饮美食 | 交易对方=飞 | 商品说明=收钱码收款 | 9.50
+        // 照抄「收钱码收款」等于把一句废话写进账本，事后翻到还是不知道买了什么
+        val draft = toJournalDraft(
+            entry(row(merchant = "飞", description = "收钱码收款", rawType = "餐饮美食")),
+        )
+        assertEquals("餐饮美食", draft.note)
+    }
+
+    @Test
+    fun `商户有信息时摘要仍是商品说明_不许被分类顶掉`() {
+        // 实测这类有 140 笔，是最不能误伤的一档
+        val draft = toJournalDraft(
+            entry(row(merchant = "小东北麻辣烫", description = "收钱码收款", rawType = "餐饮美食")),
+        )
+        assertEquals("收钱码收款", draft.note)
+    }
+
+    @Test
+    fun `收款方始终是商户_不因为摘要改成分类就跟着变`() {
+        val draft = toJournalDraft(
+            entry(row(merchant = "飞", description = "收钱码收款", rawType = "餐饮美食")),
+        )
+        assertEquals("飞", draft.payee)
     }
 }

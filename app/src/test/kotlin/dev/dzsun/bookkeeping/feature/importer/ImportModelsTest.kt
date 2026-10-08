@@ -30,6 +30,7 @@ class ImportModelsTest {
         merchant: String? = "星巴克咖啡",
         description: String? = "拿铁 大杯",
         rowNumber: Int = 5,
+        rawType: String? = "商户消费",
     ) = StatementRow(
         externalSource = "wechat",
         externalRef = "ref-$rowNumber",
@@ -39,7 +40,7 @@ class ImportModelsTest {
         merchant = merchant,
         description = description,
         status = "支付成功",
-        rawType = "商户消费",
+        rawType = rawType,
         rawTime = "2026-09-15 08:12:33",
         rowNumber = rowNumber,
     )
@@ -194,6 +195,53 @@ class ImportModelsTest {
             ),
             rows.map { it.kind },
         )
+    }
+
+    // —— 标题：账单没给名字时用交易分类 ——
+
+    @Test
+    fun `计划摊平成预览行时交易分类要带过来`() {
+        // 不带过来的话，标题规则里那个最关键的输入恒为 null，修复会静默失效
+        val rows = plan(
+            entries = listOf(
+                planned(
+                    row(merchant = "飞", description = "收钱码收款", rawType = "餐饮美食"),
+                ),
+            ),
+        ).toPreviewRows()
+
+        assertEquals("餐饮美食", rows[0].rawType)
+        assertEquals("餐饮美食", previewTitle(rows[0]).primary)
+    }
+
+    @Test
+    fun `被排除的行也带交易分类_只是它们不进账本`() {
+        val rows = plan(
+            excluded = listOf(
+                RowVerdict.NotConsumption(
+                    row(merchant = "/", description = "转账", rawType = "转账", rowNumber = 1),
+                    reason = "资金转移",
+                ),
+            ),
+        ).toPreviewRows()
+
+        assertEquals("转账", rows[0].rawType)
+    }
+
+    @Test
+    fun `用分类当标题的行不该被标成按历史`() {
+        // 分类是账单给的，不是用户历史，也不是 AI 猜的——「（按历史）」那个后缀会撒谎
+        val rows = plan(
+            entries = listOf(
+                planned(
+                    row(merchant = "飞", description = "收钱码收款", rawType = "餐饮美食"),
+                    categoryFromHistory = false,
+                ),
+            ),
+        ).toPreviewRows()
+
+        assertFalse(rows[0].categoryFromHistory)
+        assertEquals("餐饮美食", previewTitle(rows[0]).primary)
     }
 
     // —— 文案 ——
