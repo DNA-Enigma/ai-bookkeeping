@@ -23,12 +23,14 @@ set -euo pipefail
 
 TOOLCHAIN_ROOT="${TOOLCHAIN_ROOT:-$HOME/opt/android-toolchain}"
 export JAVA_HOME="$TOOLCHAIN_ROOT/jdk"
+# apksigner/apksigner.jar 内部 exec java，只 export JAVA_HOME 不够，java 必须在 PATH 上
+export PATH="$JAVA_HOME/bin:$PATH"
 export ANDROID_HOME="$TOOLCHAIN_ROOT/sdk"
 export ANDROID_SDK_ROOT="$TOOLCHAIN_ROOT/sdk"
 APK="$TOOLCHAIN_ROOT/sdk"   # 仅为下面 aapt2 路径可读
 
 REPO="DNA-Enigma/ai-bookkeeping"
-APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+APK_PATH="app/build/outputs/apk/release/app-release.apk"
 NOTES=""
 
 # --- 参数 ---
@@ -44,9 +46,22 @@ done
 command -v gh >/dev/null || { echo "需要 gh CLI" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh 未登录：先跑 gh auth login" >&2; exit 1; }
 
-echo "==> 构建"
-bash tools/build.sh :app:assembleDebug --no-build-cache >/dev/null
+echo "==> 构建（release = 必须用 keystore 签名的包）"
+bash tools/build.sh :app:assembleRelease --no-build-cache >/dev/null
 [[ -f "$APK_PATH" ]] || { echo "APK 不存在: $APK_PATH" >&2; exit 1; }
+
+# 断言签名是 release key 而不是 debug key。keystore/ 没同步到的机器上，
+# signingConfig 会是 null、照样出一个**未签名**包——文件存在≠可发布。
+# 「静默发一个装不上的包」比当场失败难查得多，所以在这里拦。
+APKSIGNER="$TOOLCHAIN_ROOT/sdk/build-tools/37.0.0/apksigner"
+CERTS="$("$APKSIGNER" verify --print-certs "$APK_PATH" 2>/dev/null || true)"
+if ! grep -q "CN=AI Bookkeeping Release" <<<"$CERTS"; then
+  echo "签名不是 release key，拒绝发布。实际证书：" >&2
+  echo "${CERTS:-<apksigner 无法读取>} " >&2
+  echo "检查 keystore/release.properties 是否存在且 storeFile 路径正确" >&2
+  exit 1
+fi
+echo "    签名校验通过: CN=AI Bookkeeping Release"
 
 echo "==> 读取版本信息"
 BADGING="$("$TOOLCHAIN_ROOT/sdk/build-tools/37.0.0/aapt2" dump badging "$APK_PATH")"
