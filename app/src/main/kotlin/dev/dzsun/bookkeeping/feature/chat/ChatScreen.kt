@@ -138,7 +138,8 @@ fun ChatScreen(
             is AskStage.Unavailable -> {
                 typing = false
                 // s.reason 已是白名单文案（见 UserFacingErrors），不透传服务端原文。
-                messages += ChatMsg.Text(true, "${s.reason}\n\n可以换个问法，比如「这个月餐饮花了多少」。")
+                // 但光说「换个问法」没用——用户不知道换成哪种，所以附一个必然能成的例子。
+                messages += ChatMsg.Text(true, askUnavailableReply(s.reason))
                 scroll()
             }
             else -> {}
@@ -182,21 +183,23 @@ fun ChatScreen(
 
     fun userSay(text: String) {
         messages += ChatMsg.Text(false, text); scroll()
-        when {
-            text.contains("省") || text.contains("建议") || text.contains("存钱") ->
+        when (val intent = classifyChatInput(text)) {
+            ChatIntent.Advice ->
                 // 不编金额：省钱建议要真算就得看真实账目。先把用户引到能真答的问题上。
                 agentSay(
                     "省钱这事得看你的真实账目，我不编数字。\n" +
                         "试着问：「这个月餐饮花了多少」「哪类花得最多」，我看完再一起想办法。",
                     900,
                 )
-            Regex("\\d+(?:\\.\\d+)?").containsMatchIn(text) -> {
-                val m = Regex("\\d+(?:\\.\\d+)?").find(text)!!
-                entryParse(text, m.value)
-            }
-            else -> {
+
+            is ChatIntent.Record -> entryParse(text, intent.amountText)
+
+            // 打招呼也回一句像样的，并顺手告诉他这个入口能干什么。
+            is ChatIntent.SmallTalk -> agentSay(intent.reply, 600)
+
+            is ChatIntent.Ask -> {
                 // 真实问账链路：调度层 → Room → 中文答案
-                viewModel.onQuestionChange(text)
+                viewModel.onQuestionChange(intent.question)
                 viewModel.onAsk()
             }
         }
