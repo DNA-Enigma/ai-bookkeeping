@@ -24,12 +24,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -68,6 +70,7 @@ import kotlin.math.abs
 @Composable
 fun StatsScreen(
     onAskClick: () -> Unit = {},
+    onBack: (() -> Unit)? = null,
     viewModel: StatsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -77,6 +80,14 @@ fun StatsScreen(
             TopAppBar(
                 title = {
                     Text("收支报表", fontWeight = FontWeight.Bold)
+                },
+                navigationIcon = {
+                    // 作为压栈子页面（报表页「详细统计 →」）时给一个返回键。
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
+                    }
                 },
                 actions = {
                     // 订阅设置：暂时隐藏（未实现的功能不展示）

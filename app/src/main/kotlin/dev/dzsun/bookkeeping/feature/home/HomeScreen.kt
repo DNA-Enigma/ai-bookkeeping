@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
@@ -90,6 +91,9 @@ fun HomeScreen(
     onEntryClick: (String) -> Unit = {},
     onAddEntry: () -> Unit = {},
     onImportClick: () -> Unit = {},
+    onAskClick: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
+    onOpenLedger: () -> Unit = {},
     viewModel: LedgerViewModel = hiltViewModel(),
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
@@ -98,6 +102,7 @@ fun HomeScreen(
     val hasAnyLedger = ui.entries.isNotEmpty()
     val enoughForAdvice = ui.entries.size >= ADVICE_MIN_ENTRIES
 
+    Box(Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -130,11 +135,11 @@ fun HomeScreen(
             }
             if (HomeModulesState.overview) {
                 SectionHeader(2, "本月总览", vertical = "收支总览")
-                OverviewBlock(ui.monthIncomeMinor, ui.monthExpenseMinor, ui.budgetUsedFraction, ui.budgetMinor, ui.budgetRemainingMinor, ui.entries)
+                OverviewBlock(ui.monthIncomeMinor, ui.monthExpenseMinor, ui.budgetUsedFraction, ui.budgetMinor, ui.budgetRemainingMinor, ui.entries, onOpenSettings)
                 Spacer(Modifier.height(40.dp))
             }
             if (HomeModulesState.transactions) {
-                SectionHeader(3, "近期流水", vertical = "今日账目") { /* TODO 全部流水 */ }
+                SectionHeader(3, "近期流水", vertical = "今日账目", onMore = onOpenLedger)
                 TxList(ui.entries.take(5), onEntryClick)
                 Spacer(Modifier.height(40.dp))
             }
@@ -149,6 +154,39 @@ fun HomeScreen(
         }
         ColophonBlock()
         Spacer(Modifier.height(110.dp))
+    }
+
+        AiOrb(
+            onClick = onAskClick,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 92.dp),
+        )
+    }
+}
+
+/**
+ * 首页 AI 悬浮球：右下角，指向问账页。
+ *
+ * 原在旧「记账」页（LedgerScreen）上，四 Tab 重构后那条路由被删、球也跟着没了。
+ * 首页是新设计里的主入口，球长在这里才够得着。
+ */
+@Composable
+private fun AiOrb(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val p = Art.colors
+    Box(
+        modifier = modifier
+            .size(56.dp)
+            .clip(CircleShape)
+            .background(if (p.dark) p.accent else p.ink)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "AI",
+            color = if (p.dark) Color(0xFF131109) else p.bg,
+            fontWeight = FontWeight.Bold,
+            fontSize = 15.sp,
+            letterSpacing = 1.sp,
+        )
     }
 }
 
@@ -348,6 +386,7 @@ private fun OverviewBlock(
     incomeMinor: Long, expenseMinor: Long,
     budgetFraction: Float, budgetMinor: Long, budgetRemainingMinor: Long,
     entries: List<LedgerRow>,
+    onOpenSettings: () -> Unit,
 ) {
     val p = Art.colors
     if (p.stageAsCard) {
@@ -375,6 +414,7 @@ private fun OverviewBlock(
             Text(
                 "去设置里定一个 →",
                 style = TextStyle(fontSize = 12.5.sp, letterSpacing = 1.sp, fontFamily = Art.type.body), color = p.accent,
+                modifier = Modifier.clickable(onClick = onOpenSettings),
             )
         }
     } else {

@@ -49,14 +49,17 @@ import androidx.navigation.NavType
 import dev.dzsun.bookkeeping.core.designsystem.Art
 import dev.dzsun.bookkeeping.core.designsystem.ArtTheme
 import dev.dzsun.bookkeeping.core.designsystem.ArtThemeState
+import dev.dzsun.bookkeeping.feature.ask.AskScreen
 import dev.dzsun.bookkeeping.feature.chat.ChatScreen
 import dev.dzsun.bookkeeping.feature.entry.AddEntrySheet
 import dev.dzsun.bookkeeping.feature.home.HomeScreen
 import dev.dzsun.bookkeeping.feature.importer.ImportScreen
 import dev.dzsun.bookkeeping.feature.ledger.EntryDetailScreen
+import dev.dzsun.bookkeeping.feature.ledger.LedgerScreen
 import dev.dzsun.bookkeeping.feature.ledgerbook.LedgerBookScreen
 import dev.dzsun.bookkeeping.feature.report.ReportScreen
 import dev.dzsun.bookkeeping.feature.settings.SettingsScreen
+import dev.dzsun.bookkeeping.feature.stats.StatsScreen
 
 object Routes {
     const val HOME = "home"
@@ -64,6 +67,12 @@ object Routes {
     const val LEDGER_BOOK = "ledgerbook"
     const val SETTINGS = "settings"
     const val CHAT = "chat"
+    /** 问账页。不是 Tab，是压栈子页面——首页 AI 球与报表页都指向它。 */
+    const val ASK = "ask"
+    /** 完整记账流水（首页「近期流水 · 全部 →」）。 */
+    const val LEDGER = "ledger"
+    /** 详细统计（报表页「详细统计 →」，含 AI 月度小结）。 */
+    const val STATS = "stats"
     const val ENTRY_DETAIL = "entry/{journalId}"
     const val IMPORT = "import"
 
@@ -83,7 +92,12 @@ private val tabs = listOf(
  * 新导航骨架（替换原 AppNavHost）：
  *  底部四 Tab：首页 · 报表 · 〔＋〕· 账簿 · 设置
  *  中央 ＋ 打开原有的 AddEntrySheet（AI 解析/拍照/澄清都在，不重复造）；
- *  AI 对话、凭证详情、账单导入为压栈子页面，不显示底栏。
+ *  问账 / 完整流水 / 详细统计 / AI 对话 / 凭证详情 / 账单导入为压栈子页面，不显示底栏。
+ *
+ * 这四条压栈路由是 152baa7 重构时漏掉的：它们原先挂在旧 Tab 上，Tab 换掉后
+ * 没有任何入口指向它们，于是整页不可达。现在各自从新界面上的真实入口进入——
+ * 问账 ← 首页 AI 球 / 报表「查看 AI 账单分析」；完整流水 ← 首页「近期流水 · 全部」；
+ * 详细统计 ← 报表「详细统计」。
  *
  * MainActivity 无需改动：RootFlow 仍调 AppNavHost(onSignOut)。
  */
@@ -95,7 +109,9 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
         val currentRoute = backStackEntry?.destination?.route
         var showAddSheet by remember { mutableStateOf(false) }
         val isDetail = currentRoute?.startsWith("entry/") == true ||
-            currentRoute == Routes.IMPORT || currentRoute == Routes.CHAT
+            currentRoute == Routes.IMPORT || currentRoute == Routes.CHAT ||
+            currentRoute == Routes.ASK || currentRoute == Routes.LEDGER ||
+            currentRoute == Routes.STATS
 
         Scaffold(
             containerColor = Art.colors.bg,
@@ -126,9 +142,17 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
                         onEntryClick = { id -> navController.navigate(Routes.entryDetail(id)) },
                         onAddEntry = { showAddSheet = true },
                         onImportClick = { navController.navigate(Routes.IMPORT) },
+                        onAskClick = { navController.navigate(Routes.ASK) },
+                        onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                        onOpenLedger = { navController.navigate(Routes.LEDGER) },
                     )
                 }
-                composable(Routes.REPORT) { ReportScreen() }
+                composable(Routes.REPORT) {
+                    ReportScreen(
+                        onAskClick = { navController.navigate(Routes.ASK) },
+                        onOpenDetailStats = { navController.navigate(Routes.STATS) },
+                    )
+                }
                 composable(Routes.LEDGER_BOOK) { LedgerBookScreen() }
                 composable(Routes.SETTINGS) {
                     SettingsScreen(
@@ -138,6 +162,23 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
                 }
                 composable(Routes.CHAT) {
                     ChatScreen(onClose = { navController.popBackStack() })
+                }
+                composable(Routes.ASK) {
+                    AskScreen(onBack = { navController.popBackStack() })
+                }
+                composable(Routes.LEDGER) {
+                    LedgerScreen(
+                        onAddEntry = { showAddSheet = true },
+                        onEntryClick = { id -> navController.navigate(Routes.entryDetail(id)) },
+                        onAskClick = { navController.navigate(Routes.ASK) },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(Routes.STATS) {
+                    StatsScreen(
+                        onAskClick = { navController.navigate(Routes.ASK) },
+                        onBack = { navController.popBackStack() },
+                    )
                 }
                 composable(Routes.IMPORT) {
                     ImportScreen(

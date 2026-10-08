@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Edit
@@ -68,6 +69,7 @@ fun LedgerScreen(
     onAddEntry: () -> Unit,
     onEntryClick: (String) -> Unit = {},
     onAskClick: () -> Unit = {},
+    onBack: (() -> Unit)? = null,
     viewModel: LedgerViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -78,7 +80,7 @@ fun LedgerScreen(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 96.dp),
         ) {
-            item { HomeTopBar(onAskClick = onAskClick) }
+            item { HomeTopBar(onAskClick = onAskClick, onBack = onBack) }
             item {
                 SummaryCard(
                     state = state,
@@ -123,13 +125,19 @@ fun LedgerScreen(
 }
 
 @Composable
-private fun HomeTopBar(onAskClick: () -> Unit) {
+private fun HomeTopBar(onAskClick: () -> Unit, onBack: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 20.dp, end = 8.dp, top = 16.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 作为压栈子页面（首页「近期流水 · 全部 →」）时给一个返回键。
+        if (onBack != null) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            }
+        }
         Text(
             "记账",
             style = MaterialTheme.typography.headlineMedium,

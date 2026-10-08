@@ -56,7 +56,11 @@ private fun fmt(minor: Long): String = "%,.2f".format(kotlin.math.abs(minor) / 1
 private fun fmtInt(minor: Long): String = "%,d".format(kotlin.math.abs(minor) / 100)
 
 @Composable
-fun ReportScreen(viewModel: ReportViewModel = hiltViewModel()) {
+fun ReportScreen(
+    onAskClick: () -> Unit = {},
+    onOpenDetailStats: () -> Unit = {},
+    viewModel: ReportViewModel = hiltViewModel(),
+) {
     val ui by viewModel.state.collectAsStateWithLifecycle()
     val report = ui.report
 
@@ -69,6 +73,14 @@ fun ReportScreen(viewModel: ReportViewModel = hiltViewModel()) {
     ) {
         Spacer(Modifier.height(28.dp))
         ReportHero(ui.month, report, ui.canGoPrevious, ui.canGoNext, viewModel::onPreviousMonth, viewModel::onNextMonth)
+
+        // AI 账单分析入口：一句话问账本（判定交调度层，算术在本机）。
+        LinkRow(
+            title = "查看 AI 账单分析",
+            subtitle = "用一句话问这个月的花销",
+            onClick = onAskClick,
+        )
+        Spacer(Modifier.height(28.dp))
 
         if (report == null) {
             Text(
@@ -86,8 +98,49 @@ fun ReportScreen(viewModel: ReportViewModel = hiltViewModel()) {
             Spacer(Modifier.height(44.dp))
             SectionHeader(3, "收支对比")
             CompareBlock(report)
+            Spacer(Modifier.height(44.dp))
+            // 详细统计（含 AI 月度小结）在 StatisticsScreen，别在这里重复造一份。
+            LinkRow(
+                title = "详细统计",
+                subtitle = "四宫格数据 + AI 月度小结",
+                onClick = onOpenDetailStats,
+            )
         }
         Spacer(Modifier.height(110.dp))
+    }
+}
+
+/** 报表页里的入口行：标题 + 副标题 + 箭头，整行可点。 */
+@Composable
+private fun LinkRow(title: String, subtitle: String, onClick: () -> Unit) {
+    val p = Art.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(p.radiusL))
+            .background(p.surface)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = TextStyle(fontSize = 14.5.sp, fontWeight = FontWeight.Medium, fontFamily = Art.type.body),
+                color = p.ink,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                subtitle,
+                style = TextStyle(fontSize = 12.sp, fontFamily = Art.type.body),
+                color = p.ink3,
+            )
+        }
+        Text(
+            "→",
+            style = TextStyle(fontSize = 16.sp),
+            color = p.accent,
+        )
     }
 }
 
