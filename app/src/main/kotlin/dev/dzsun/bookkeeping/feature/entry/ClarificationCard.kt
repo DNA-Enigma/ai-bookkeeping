@@ -1,6 +1,8 @@
 package dev.dzsun.bookkeeping.feature.entry
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,11 +10,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -28,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.dzsun.bookkeeping.core.network.ClarificationOption
@@ -149,14 +152,26 @@ fun FieldEditSummary(edits: List<dev.dzsun.bookkeeping.core.network.FieldEdit>, 
     }
 }
 
-/** 低置信度标记，放在卡片角上。 */
+/**
+ * 低置信度标记，放在卡片角上。
+ *
+ * 它是**状态标签**，不是按钮——所以刻意用不可点的容器画，而不是
+ * `AssistChip(onClick = {})`：后者长得像能点、点了却毫无反应。
+ */
 @Composable
 fun NeedsConfirmChip(modifier: Modifier = Modifier) {
-    AssistChip(
-        onClick = {},
-        label = { Text("待确认") },
-        modifier = modifier,
-    )
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(
+            "待确认",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
+    }
 }
 
 /**

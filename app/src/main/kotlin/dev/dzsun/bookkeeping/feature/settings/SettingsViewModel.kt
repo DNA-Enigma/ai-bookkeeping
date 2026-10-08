@@ -6,6 +6,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.dzsun.bookkeeping.BuildConfig
 import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.database.AccountType
+import dev.dzsun.bookkeeping.core.designsystem.AgentPersona
 import dev.dzsun.bookkeeping.core.ledger.ConfidenceGate
 import dev.dzsun.bookkeeping.core.ledger.LedgerRepository
 import dev.dzsun.bookkeeping.core.update.ApkInstaller
@@ -14,6 +15,9 @@ import dev.dzsun.bookkeeping.core.update.UpdateManifest
 import dev.dzsun.bookkeeping.core.update.UpdateStatus
 import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.feature.entry.AutoConfirmSettings
+import dev.dzsun.bookkeeping.feature.home.HomeModule
+import dev.dzsun.bookkeeping.feature.home.HomeModules
+import dev.dzsun.bookkeeping.feature.home.HomeModulesStore
 import dev.dzsun.bookkeeping.feature.ledger.MonthlyBudgetStore
 import dev.dzsun.bookkeeping.feature.ledger.yuanToMinor
 import kotlinx.coroutines.flow.update
@@ -55,6 +59,12 @@ data class SettingsUiState(
         ConfidenceGate.MIN_THRESHOLD..ConfidenceGate.MAX_THRESHOLD,
     /** 月预算（最小单位）。0 = 不设。真源是 [MonthlyBudgetStore]。 */
     val budgetMinor: Long = 0L,
+    /** 首页模块开关。真源是 [HomeModulesStore]，首页读的是同一份。 */
+    val modules: HomeModules = HomeModules(),
+    /** AI 助手人设。真源是 [AgentPrefsStore]，落盘、离开页面不丢。 */
+    val persona: AgentPersona = AgentPersona.BUTLER,
+    /** 首选理财平台。真源同上。 */
+    val platform: String = AGENT_PLATFORMS.first(),
 )
 
 @HiltViewModel
@@ -64,6 +74,8 @@ class SettingsViewModel @Inject constructor(
     private val apkInstaller: ApkInstaller,
     private val autoConfirmSettings: AutoConfirmSettings,
     private val monthlyBudgetStore: MonthlyBudgetStore,
+    private val homeModulesStore: HomeModulesStore,
+    private val agentPrefsStore: AgentPrefsStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SettingsUiState())
@@ -85,6 +97,15 @@ class SettingsViewModel @Inject constructor(
             monthlyBudgetStore.budgetMinor.collect { value ->
                 _state.update { it.copy(budgetMinor = value) }
             }
+        }
+        viewModelScope.launch {
+            homeModulesStore.state.collect { m -> _state.update { it.copy(modules = m) } }
+        }
+        viewModelScope.launch {
+            agentPrefsStore.persona.collect { p -> _state.update { it.copy(persona = p) } }
+        }
+        viewModelScope.launch {
+            agentPrefsStore.platform.collect { p -> _state.update { it.copy(platform = p) } }
         }
         viewModelScope.launch {
             val currency = repository.observeBaseCurrency()
@@ -121,6 +142,15 @@ class SettingsViewModel @Inject constructor(
         val minor = yuanToMinor(text) ?: return
         monthlyBudgetStore.setBudgetMinor(minor)
     }
+
+    /** 首页模块显隐。写入 [HomeModulesStore]，落盘并立即反映到首页。 */
+    fun onModuleChange(module: HomeModule, enabled: Boolean) = homeModulesStore.set(module, enabled)
+
+    /** 改 AI 助手人设，落盘。 */
+    fun onPersonaChange(persona: AgentPersona) = agentPrefsStore.setPersona(persona)
+
+    /** 改首选理财平台，落盘。 */
+    fun onPlatformChange(platform: String) = agentPrefsStore.setPlatform(platform)
 
     fun checkForUpdate() {
         if (_state.value.update is UpdateUiState.Checking) return

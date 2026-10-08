@@ -1,7 +1,6 @@
 package dev.dzsun.bookkeeping.feature.ledgerbook
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -71,7 +70,7 @@ fun LedgerBookScreen(viewModel: LedgerBookViewModel = hiltViewModel()) {
             SectionHeader(1, "余额试算")
             BalanceTable(ui)
             Spacer(Modifier.height(44.dp))
-            SectionHeader(2, "近期凭证") { /* TODO 全部凭证 */ }
+            SectionHeader(2, "近期凭证")
             if (ui.vouchers.isEmpty()) {
                 Text(
                     "本月还没有分录",
@@ -109,14 +108,13 @@ private fun LedgerHero(month: YearMonth) {
             ),
             color = p.ink
         )
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(999.dp))
-                .border(1.dp, p.line, RoundedCornerShape(999.dp))
-                .padding(horizontal = 14.dp, vertical = 7.dp)
-        ) {
-            Text("${month.year} 年 ${month.monthValue} 月", style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.5.sp), color = p.ink2)
-        }
+        // 月份只是标签，没有切月能力——所以不画成胶囊按钮的样子，
+        // 免得上手就点、点了没反应（切月要 LedgerBookViewModel 支持，尚未做）。
+        Text(
+            "${month.year} 年 ${month.monthValue} 月",
+            style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.5.sp, fontFamily = Art.type.body),
+            color = p.ink3,
+        )
     }
     Spacer(Modifier.height(10.dp))
     Text(

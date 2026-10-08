@@ -67,15 +67,6 @@ import java.time.LocalDate
  * ============================================================
  */
 
-/** 首页模块开关（TODO 持久化到 DataStore） */
-object HomeModulesState {
-    var greeting by mutableStateOf(true)
-    var insights by mutableStateOf(true)
-    var overview by mutableStateOf(true)
-    var transactions by mutableStateOf(true)
-    var health by mutableStateOf(true)
-}
-
 /**
  * 给出建议所需最少账目笔数。
  *
@@ -95,8 +86,11 @@ fun HomeScreen(
     onOpenSettings: () -> Unit = {},
     onOpenLedger: () -> Unit = {},
     viewModel: LedgerViewModel = hiltViewModel(),
+    modulesViewModel: HomeModulesViewModel = hiltViewModel(),
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
+    // 模块开关落盘在 HomeModulesStore，设置页改完这里立刻跟着变、重启也还在。
+    val modules by modulesViewModel.state.collectAsStateWithLifecycle()
 
     // 数据存在性判据：只用 uiState 已有字段，不另起全局状态。
     val hasAnyLedger = ui.entries.isNotEmpty()
@@ -110,7 +104,7 @@ fun HomeScreen(
             .padding(horizontal = 22.dp)
     ) {
         Spacer(Modifier.height(28.dp))
-        if (HomeModulesState.greeting) HeroBlock(onOpenChat)
+        if (modules.greeting) HeroBlock(onOpenChat)
         StageBlock(
             balanceMinor = ui.balanceMinor,
             incomeMinor = ui.monthIncomeMinor,
@@ -123,7 +117,7 @@ fun HomeScreen(
             OnboardingRail(onAddEntry, onImportClick, onOpenChat)
             Spacer(Modifier.height(40.dp))
         } else {
-            if (HomeModulesState.insights) {
+            if (modules.insights) {
                 SectionHeader(1, "主动建议", vertical = "建言三则")
                 InsightRail(
                     entries = ui.entries,
@@ -132,12 +126,12 @@ fun HomeScreen(
                 )
                 Spacer(Modifier.height(40.dp))
             }
-            if (HomeModulesState.overview) {
+            if (modules.overview) {
                 SectionHeader(2, "本月总览", vertical = "收支总览")
                 OverviewBlock(ui.monthIncomeMinor, ui.monthExpenseMinor, ui.budgetUsedFraction, ui.budgetMinor, ui.budgetRemainingMinor, ui.entries, onOpenSettings)
                 Spacer(Modifier.height(40.dp))
             }
-            if (HomeModulesState.transactions) {
+            if (modules.transactions) {
                 SectionHeader(3, "近期流水", vertical = "今日账目", onMore = onOpenLedger)
                 TxList(ui.entries.take(5), onEntryClick)
                 Spacer(Modifier.height(40.dp))
@@ -147,7 +141,7 @@ fun HomeScreen(
         // 才撑得起一个分数。在那之前一律不渲染——一个编出来的 82 分比没有更伤信任。
         // 评分模型接入后把 healthReady 翻成 true，并按与 insights 相同的判据放开。
         val healthReady = false
-        if (HomeModulesState.health && healthReady) {
+        if (modules.health && healthReady) {
             SectionHeader(4, "财务体质", vertical = "体质评分")
             HealthBlock()
         }

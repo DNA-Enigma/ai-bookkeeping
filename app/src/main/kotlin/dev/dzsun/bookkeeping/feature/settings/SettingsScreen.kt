@@ -39,7 +39,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.dzsun.bookkeeping.core.designsystem.*
-import dev.dzsun.bookkeeping.feature.home.HomeModulesState
+import dev.dzsun.bookkeeping.feature.home.HomeModule
 import dev.dzsun.bookkeeping.feature.ledger.minorToYuanInput
 
 /**
@@ -72,10 +72,10 @@ fun SettingsScreen(
         ThemeGrid()
         Spacer(Modifier.height(40.dp))
         SectionHeader(2, "首页模块")
-        ModuleToggles()
+        ModuleToggles(state, viewModel)
         Spacer(Modifier.height(40.dp))
         SectionHeader(3, "AI 助手")
-        AssistantBlock()
+        AssistantBlock(state, viewModel)
         Spacer(Modifier.height(40.dp))
         SectionHeader(4, "账本")
         LedgerSection(state, onImportClick, viewModel::onBudgetYuanChange)
@@ -165,12 +165,20 @@ private fun ThemeCard(style: ArtStyle, modifier: Modifier) {
 /* ---------------- 首页模块开关 ---------------- */
 
 @Composable
-private fun ModuleToggles() {
+private fun ModuleToggles(state: SettingsUiState, viewModel: SettingsViewModel) {
     Column {
-        ToggleRow("管家问候", "每日寒暄与今日摘要", HomeModulesState.greeting) { HomeModulesState.greeting = it }
-        ToggleRow("主动建议", "管家每日 3 则以内的洞察", HomeModulesState.insights) { HomeModulesState.insights = it }
-        ToggleRow("本月总览", "收支数字与预算执行", HomeModulesState.overview) { HomeModulesState.overview = it }
-        ToggleRow("近期流水", "最近 5 笔账目", HomeModulesState.transactions) { HomeModulesState.transactions = it }
+        ToggleRow("管家问候", "每日寒暄与今日摘要", state.modules.greeting) {
+            viewModel.onModuleChange(HomeModule.GREETING, it)
+        }
+        ToggleRow("主动建议", "管家每日 3 则以内的洞察", state.modules.insights) {
+            viewModel.onModuleChange(HomeModule.INSIGHTS, it)
+        }
+        ToggleRow("本月总览", "收支数字与预算执行", state.modules.overview) {
+            viewModel.onModuleChange(HomeModule.OVERVIEW, it)
+        }
+        ToggleRow("近期流水", "最近 5 笔账目", state.modules.transactions) {
+            viewModel.onModuleChange(HomeModule.TRANSACTIONS, it)
+        }
         // 「财务体质」暂时不给开关：评分模型没接入，首页一律不渲染那个模块，
         // 让用户开关一个看不见的东西只会造成困惑。模型落地后与其它行一并恢复。
     }
@@ -196,27 +204,33 @@ private fun ToggleRow(title: String, desc: String, checked: Boolean, onChange: (
 /* ---------------- AI 助手 ---------------- */
 
 @Composable
-private fun AssistantBlock() {
-    var persona by remember { mutableStateOf("贴心管家") }
-    var platform by remember { mutableStateOf("余额宝") }
+private fun AssistantBlock(state: SettingsUiState, viewModel: SettingsViewModel) {
     val p = Art.colors
     Text("人 设", style = TextStyle(fontSize = 12.sp, letterSpacing = 2.sp, fontFamily = Art.type.body), color = p.ink3)
     Spacer(Modifier.height(14.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        listOf("专业顾问", "贴心管家", "毒舌闺蜜", "极简助手").forEach { name ->
-            ArtChip(name, selected = persona == name, onClick = { persona = name })
+        AgentPersona.entries.forEach { persona ->
+            ArtChip(
+                persona.displayName,
+                selected = state.persona == persona,
+                onClick = { viewModel.onPersonaChange(persona) },
+            )
         }
     }
     Spacer(Modifier.height(28.dp))
     Text("首 选 理 财 平 台", style = TextStyle(fontSize = 12.sp, letterSpacing = 2.sp, fontFamily = Art.type.body), color = p.ink3)
     Spacer(Modifier.height(14.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        listOf("余额宝", "零钱通", "朝朝宝").forEach { name ->
-            ArtChip(name, selected = platform == name, onClick = { platform = name })
+        AGENT_PLATFORMS.forEach { name ->
+            ArtChip(
+                name,
+                selected = state.platform == name,
+                onClick = { viewModel.onPlatformChange(name) },
+            )
         }
     }
     Spacer(Modifier.height(16.dp))
-    Text("投资建议将以「复制金额 + 操作指引」的形式给出，由你手动在 $platform 完成。",
+    Text("投资建议将以「复制金额 + 操作指引」的形式给出，由你手动在 ${state.platform} 完成。",
         style = TextStyle(fontSize = 12.sp, lineHeight = 20.sp, fontFamily = Art.type.body), color = p.ink3)
 }
 

@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -31,6 +32,8 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,6 +48,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -64,6 +68,13 @@ import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.designsystem.BrandBlue
 import dev.dzsun.bookkeeping.core.designsystem.ExpenseOrange
 import dev.dzsun.bookkeeping.core.designsystem.categoryColor
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+private val sheetDateFormatter = DateTimeFormatter.ofPattern("M月d日", Locale.CHINA)
 
 /**
  * 「记一笔」半屏面板：金额大字 + 分类宫格 + 数字键盘。
@@ -114,9 +125,10 @@ fun AddEntrySheet(
                     ) { Text("收入") }
                 }
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { viewModel.onDateChange(java.time.LocalDate.now().toEpochDay()) }) {
-                    Text("今天")
-                }
+                EntryDateButton(
+                    dateEpochDay = state.dateEpochDay,
+                    onDateChange = viewModel::onDateChange,
+                )
                 PhotoMenu(onPickGallery = photoCapture::pickFromGallery, onTakePhoto = photoCapture::takePhoto)
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Default.Close, contentDescription = "关闭")
@@ -161,7 +173,49 @@ fun AddEntrySheet(
     }
 }
 
+/**
+ * 记账日期按钮：显示当前选中的日期（今天显示「今天」），点了开日期选择器。
+ *
+ * 原来的「今天」按钮点了只把日期设成今天，界面上又没有任何地方显示日期，
+ * 于是「点了无变化」，而且**根本没法记非今天的账**。换成日期选择器后，
+ * 既能一眼看到日期，也能补记往前的账。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EntryDateButton(dateEpochDay: Long, onDateChange: (Long) -> Unit) {
+    var showPicker by remember { mutableStateOf(false) }
+    val date = LocalDate.ofEpochDay(dateEpochDay)
+    val label = if (dateEpochDay == LocalDate.now().toEpochDay()) "今天" else date.format(sheetDateFormatter)
+    TextButton(onClick = { showPicker = true }) {
+        Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(label)
+    }
+    if (showPicker) {
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = dateEpochDay * 86_400_000L)
+        DatePickerDialog(
+            onDismissRequest = { showPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    pickerState.selectedDateMillis?.let {
+                        onDateChange(
+                            Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalDate().toEpochDay(),
+                        )
+                    }
+                    showPicker = false
+                }) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPicker = false }) { Text("取消") }
+            },
+        ) {
+            DatePicker(state = pickerState)
+        }
+    }
+}
+
 /** 相册 / 相机两个入口。 */
+
 @Composable
 private fun PhotoMenu(onPickGallery: () -> Unit, onTakePhoto: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
