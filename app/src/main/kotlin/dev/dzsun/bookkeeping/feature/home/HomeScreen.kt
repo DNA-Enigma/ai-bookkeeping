@@ -100,7 +100,6 @@ fun HomeScreen(
 
     // 数据存在性判据：只用 uiState 已有字段，不另起全局状态。
     val hasAnyLedger = ui.entries.isNotEmpty()
-    val enoughForAdvice = ui.entries.size >= ADVICE_MIN_ENTRIES
 
     Box(Modifier.fillMaxSize()) {
     Column(
@@ -125,11 +124,11 @@ fun HomeScreen(
             Spacer(Modifier.height(40.dp))
         } else {
             if (HomeModulesState.insights) {
-                SectionHeader(1, "主动建议", vertical = "建言三则") { /* TODO 全部建言 */ }
+                SectionHeader(1, "主动建议", vertical = "建言三则")
                 InsightRail(
-                    hasEnoughData = enoughForAdvice,
-                    entryCount = ui.entries.size,
+                    entries = ui.entries,
                     onAddEntry = onAddEntry,
+                    onAskClick = onAskClick,
                 )
                 Spacer(Modifier.height(40.dp))
             }
@@ -306,21 +305,42 @@ private fun StageBlock(balanceMinor: Long, incomeMinor: Long, expenseMinor: Long
 /* ---------------- 主动建议横滑 ---------------- */
 
 /**
- * 三态里的后两态（第一态「无账目」整块不渲染，由 [HomeScreen] 处理）：
- * - 数据还不够 → 引导态卡片，文案只说「还差几笔」，不编任何金额/百分比，
- *   更不出现「超支」「预警」——没有预算就不该有超支；
- * - 数据够了   → [demoInsights]。那是**占位文案**（不含编造数字），
- *   等 feature/discover 的 Advisor 接上再换成真建议。
+ * 主动建议横滑。**两条分支都只喂真实数据，没有一条是演示文案**：
+ * - 数据还不够 → 引导态卡片，只说「还差几笔」，不编任何金额/百分比；
+ * - 数据够了   → 用客户端对 `entries` 的真实聚合给出**一条**观察：
+ *   花得最多的类目。数字来自账本，动作指向能继续看的地方（问账），不空转。
+ *
+ * 原来这里在「够了」分支渲染 demoInsights（三个写死的占位建议 + 三个空 lambda），
+ * 注释自称「不喂给真用户」实际却喂了——已删。真正的多则建议引擎落地前，
+ * 与其编三条，不如给一条真的。
  */
 @Composable
-private fun InsightRail(hasEnoughData: Boolean, entryCount: Int, onAddEntry: () -> Unit) {
+private fun InsightRail(
+    entries: List<LedgerRow>,
+    onAddEntry: () -> Unit,
+    onAskClick: () -> Unit,
+) {
+    val topCategory = entries
+        .filter { it.categoryType == AccountType.EXPENSE }
+        .groupBy { it.categoryName }
+        .map { (name, rows) -> name to rows.sumOf { kotlin.math.abs(it.amountMinor) } }
+        .maxByOrNull { it.second }
+
     val items: List<AgentInsight>
     val actions: List<() -> Unit>
-    if (hasEnoughData) {
-        items = demoInsights
-        actions = List(items.size) { {} }
+    if (entries.size >= ADVICE_MIN_ENTRIES && topCategory != null) {
+        val (name, amountMinor) = topCategory
+        items = listOf(
+            AgentInsight(
+                InsightType.INFO, "「$name」花得最多",
+                "你记下的账里，「$name」累计 ¥${fmtInt(amountMinor)}，是各类目里最高的。" +
+                    "想知道它最近花了多少，问一句就行。",
+                "问一句 →",
+            ),
+        )
+        actions = listOf(onAskClick)
     } else {
-        val missing = (ADVICE_MIN_ENTRIES - entryCount).coerceAtLeast(1)
+        val missing = (ADVICE_MIN_ENTRIES - entries.size).coerceAtLeast(1)
         items = listOf(
             AgentInsight(
                 InsightType.INFO, "还在熟悉你的花销",
