@@ -35,6 +35,10 @@ internal object XlsxSheet {
     private const val SHARED_STRINGS = "xl/sharedStrings.xml"
     private const val STYLES = "xl/styles.xml"
     private const val SHEET_PREFIX = "xl/worksheets/sheet"
+    private const val ENTRY_BUFFER = 16 * 1024
+
+    /** 列名相乘的溢出哨兵，远大于 [StatementLimits.MAX_COLUMNS]，仅用于提前收手。 */
+    private const val MAX_COLUMN_GUARD = 1_000_000
 
     /**
      * 读成网格。[row][col] 是单元格文本，且**行下标与 Excel 的行号一一对应**
@@ -44,6 +48,12 @@ internal object XlsxSheet {
      * 让调用方退回按普通压缩包处理。
      */
     fun read(bytes: ByteArray): List<List<String>>? {
+        if (bytes.size > StatementLimits.MAX_ARCHIVE_BYTES) {
+            throw StatementLimitExceeded(
+                "文件过大（${StatementLimits.humanSize(bytes.size.toLong())}），" +
+                    "超过上限 ${StatementLimits.humanSize(StatementLimits.MAX_ARCHIVE_BYTES.toLong())}；已拒绝导入",
+            )
+        }
         val entries = unzip(bytes) ?: return null
         if (!entries.containsKey(WORKBOOK_MARKER)) return null
 
@@ -57,18 +67,65 @@ internal object XlsxSheet {
         return parseSheet(sheetXml, shared, dateStyles)
     }
 
-    private fun unzip(bytes: ByteArray): Map<String, ByteArray>? = runCatching {
+    /**
+     * 解压所有条目，**带炸弹防护**。
+     *
+     * 与 [StatementArchive] 是两条独立入口（xlsx 也是 zip，会先走这里），
+     * 所以上限两边都要守。头部声明的大小不可信，真正的兜底是
+     * [readEntryLimited] 按**实际读取量**累计。
+     *
+     * 不是可读的 zip（加密包、别的压缩格式）返回 null，让调用方退回按压缩包处理；
+     * 只有**触碰上限**才抛 [StatementLimitExceeded]——那必须让用户看见理由，不能静默吞掉。
+     */
+    private fun unzip(bytes: ByteArray): Map<String, ByteArray>? {
         val entries = mutableMapOf<String, ByteArray>()
-        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                if (entry.isDirectory) continue
-                // ZipInputStream.read 在当前条目结束处返回 -1，所以这读到的是**这一个条目**
-                entries[entry.name] = zip.readBytes()
+        var total = 0L
+        var count = 0
+        try {
+            ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (entry.isDirectory) continue
+                    if (++count > StatementLimits.MAX_ENTRIES) {
+                        throw StatementLimitExceeded("压缩包条目数超过 ${StatementLimits.MAX_ENTRIES}；已拒绝导入")
+                    }
+                    StatementLimits.checkRatio(entry.compressedSize, entry.size, "压缩包内的「${entry.name}」")
+                    // ZipInputStream.read 在当前条目结束处返回 -1，所以这读到的是**这一个条目**
+                    val data = zip.readEntryLimited(StatementLimits.MAX_ENTRY_BYTES)
+                    total += data.size
+                    if (total > StatementLimits.MAX_TOTAL_BYTES) {
+                        throw StatementLimitExceeded(
+                            "压缩包解压后累计超过 " +
+                                "${StatementLimits.humanSize(StatementLimits.MAX_TOTAL_BYTES.toLong())}；疑似压缩炸弹，已拒绝导入",
+                        )
+                    }
+                    entries[entry.name] = data
+                }
             }
+        } catch (e: java.util.zip.ZipException) {
+            return null
+        } catch (e: java.io.IOException) {
+            return null
         }
-        entries
-    }.getOrNull()
+        return entries
+    }
+
+    /** 读一个条目的全部字节，超过 [limit] 立即失败——绝不把未知长度的流读爆内存。 */
+    private fun ZipInputStream.readEntryLimited(limit: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(ENTRY_BUFFER)
+        while (true) {
+            val read = read(buffer)
+            if (read < 0) break
+            if (out.size().toLong() + read > limit) {
+                throw StatementLimitExceeded(
+                    "压缩包内的条目解压后超过 ${StatementLimits.humanSize(limit.toLong())}；疑似压缩炸弹，已拒绝导入",
+                )
+            }
+            out.write(buffer, 0, read)
+        }
+        return out.toByteArray()
+    }
 
     /**
      * 共享字符串表。一条 `<si>` 可能被拆成多个 `<r>`（富文本分片），
@@ -94,15 +151,30 @@ internal object XlsxSheet {
         val rows = mutableListOf<List<String>>()
         for (i in 0 until rowNodes.length) {
             val rowElement = rowNodes.item(i) as? Element ?: continue
-            // row 的 r 属性是 1 基的 Excel 行号，缺了就按顺序递推
-            val rowNumber = rowElement.getAttribute("r").toIntOrNull() ?: (rows.size + 1)
+            // row 的 r 属性是 1 基的 Excel 行号，缺了就按顺序递推。
+            // 小于 1 的（0/负数）是畸形值，同样按递推处理，别拿去当数组下标。
+            val declaredRow = rowElement.getAttribute("r").toIntOrNull()
+            val rowNumber = declaredRow?.takeIf { it >= 1 } ?: (rows.size + 1)
+            // 行号是**不可信输入**：`r="2000000000"` 会让下面的循环建出二十亿个空行
+            if (rowNumber > StatementLimits.MAX_ROWS) {
+                throw StatementLimitExceeded(
+                    "表格行号 $rowNumber 超过上限 ${StatementLimits.MAX_ROWS}；已拒绝导入",
+                )
+            }
             while (rows.size < rowNumber) rows.add(emptyList())
 
             val cells = mutableListOf<String>()
             val cellNodes = rowElement.getElementsByTagName("c")
             for (j in 0 until cellNodes.length) {
                 val cell = cellNodes.item(j) as? Element ?: continue
-                val column = columnIndex(cell.getAttribute("r")).coerceAtLeast(cells.size)
+                val rawColumn = columnIndex(cell.getAttribute("r"))
+                // 列号同理：超长列名（如 `ZZZZZZZZZ1`）会撑出巨大的列数组
+                if (rawColumn >= StatementLimits.MAX_COLUMNS) {
+                    throw StatementLimitExceeded(
+                        "表格列号超过上限 ${StatementLimits.MAX_COLUMNS}；已拒绝导入",
+                    )
+                }
+                val column = rawColumn.coerceAtLeast(cells.size)
                 while (cells.size <= column) cells.add("")
                 cells[column] = cellText(cell, shared, dateStyles)
             }
@@ -210,6 +282,9 @@ internal object XlsxSheet {
         for (ch in reference) {
             if (ch !in 'A'..'Z') break
             index = index * 26 + (ch - 'A' + 1)
+            // 提前收手，避免超长列名把 Int 乘溢出成负数——
+            // 负数会被 coerceAtLeast 当成"没这列"，静默丢数据。返回一个明显越界的哨兵。
+            if (index > MAX_COLUMN_GUARD) return Int.MAX_VALUE
         }
         return index - 1
     }

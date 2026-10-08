@@ -71,6 +71,7 @@ import dev.dzsun.bookkeeping.core.money.Money
 import dev.dzsun.bookkeeping.core.statement.ImportOutcome
 import dev.dzsun.bookkeeping.core.statement.ImportPlan
 import dev.dzsun.bookkeeping.core.statement.StatementDirection
+import dev.dzsun.bookkeeping.core.statement.StatementLimits
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1076,7 +1077,21 @@ private fun readStatementFile(
         if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
     } ?: uri.lastPathSegment ?: "账单文件"
 
-    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        ?: error("打不开这个文件")
+    val limit = StatementLimits.MAX_ARCHIVE_BYTES
+    // 有界读取：`readBytes()` 会把整个文件吃进内存，一个几百 MB 的恶意文件先 OOM，
+    // 根本轮不到解析层去拒绝。这里读到上限再多一字节就报错。
+    val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+        val out = java.io.ByteArrayOutputStream()
+        val chunk = ByteArray(64 * 1024)
+        while (true) {
+            val read = input.read(chunk)
+            if (read < 0) break
+            if (out.size().toLong() + read > limit) {
+                error("文件过大，超过上限 ${StatementLimits.humanSize(limit.toLong())}；已拒绝导入")
+            }
+            out.write(chunk, 0, read)
+        }
+        out.toByteArray()
+    } ?: error("打不开这个文件")
     LoadedStatement(name, bytes)
 }

@@ -23,11 +23,26 @@ object StatementArchive {
      */
     fun open(bytes: ByteArray, password: String?): ArchiveExtraction {
         if (!isZip(bytes)) return ArchiveExtraction.NotZip
+        if (bytes.size > StatementLimits.MAX_ARCHIVE_BYTES) {
+            return ArchiveExtraction.Failed(archiveTooLarge(bytes.size))
+        }
+        return try {
+            scan(bytes, password)
+        } catch (e: StatementLimitExceeded) {
+            // 越界不是「读不了」的普通情形，而是**拒绝**——理由原样带给用户
+            ArchiveExtraction.Failed(e.reason)
+        }
+    }
 
+    private fun scan(bytes: ByteArray, password: String?): ArchiveExtraction {
         var offset = 0
         var sawEncrypted = false
+        var entryCount = 0
         while (offset + LOCAL_HEADER_SIZE <= bytes.size) {
             if (le32(bytes, offset) != LOCAL_HEADER_SIGNATURE) break
+            if (++entryCount > StatementLimits.MAX_ENTRIES) {
+                throw StatementLimitExceeded("压缩包条目数超过 ${StatementLimits.MAX_ENTRIES}；已拒绝导入")
+            }
             val flags = le16(bytes, offset + 6)
             val method = le16(bytes, offset + 8)
             val dosTime = le16(bytes, offset + 10)
@@ -44,12 +59,17 @@ object StatementArchive {
             val dataStart = nameStart + nameLength + extraLength
             if (dataStart > bytes.size) break
 
+            // 头部声明的长度也是**不可信输入**，先过一道闸，别让它进到解压那一步
+            checkEntrySize(name, compressedSize, uncompressedSize)
+
             val encrypted = (flags and FLAG_ENCRYPTED) != 0
             val isCsv = name.endsWith(".csv", ignoreCase = true)
             // 优先挑 csv；不是 csv 的条目（如说明文本）跳过继续找
             if (!isCsv && offset + LOCAL_HEADER_SIZE < bytes.size) {
                 if (compressedSize <= 0) break
-                offset = dataStart + compressedSize
+                val next = dataStart.toLong() + compressedSize
+                if (next > bytes.size) break
+                offset = next.toInt()
                 if (encrypted) sawEncrypted = true
                 continue
             }
@@ -75,6 +95,31 @@ object StatementArchive {
             ArchiveExtraction.Failed("压缩包里没有找到 CSV 条目")
         }
     }
+
+    /**
+     * 头里声明的压缩/解压长度先过一遍闸。
+     *
+     * 这里挡的是「头部就声称解压出巨量数据」的包；挡不住的部分
+     * （头部撒谎、实际解压远超声明）由 [inflate] 循环里的累计上限兜底。
+     */
+    private fun checkEntrySize(name: String, compressedSize: Int, uncompressedSize: Int) {
+        val label = if (name.isNotEmpty()) "压缩包内的「$name」" else "压缩包内的条目"
+        // 32 位头里 >= 0x8000_0000 会读成负数（含 Zip64 的 0xFFFFFFFF 占位）。
+        // 真实账单不可能这么大，按越界拒绝，别让它进到解码/复制那一步。
+        if (uncompressedSize < 0) throw StatementLimitExceeded("$label 声明解压后超过 2 GiB；已拒绝导入")
+        if (compressedSize < 0) throw StatementLimitExceeded("$label 的压缩大小异常；已拒绝导入")
+        if (uncompressedSize > StatementLimits.MAX_ENTRY_BYTES) {
+            throw StatementLimitExceeded(
+                "$label 解压后约 ${StatementLimits.humanSize(uncompressedSize.toLong())}，" +
+                    "超过上限 ${StatementLimits.humanSize(StatementLimits.MAX_ENTRY_BYTES.toLong())}；已拒绝导入",
+            )
+        }
+        StatementLimits.checkRatio(compressedSize.toLong(), uncompressedSize.toLong(), label)
+    }
+
+    private fun archiveTooLarge(size: Int): String =
+        "文件过大（${StatementLimits.humanSize(size.toLong())}），" +
+            "超过上限 ${StatementLimits.humanSize(StatementLimits.MAX_ARCHIVE_BYTES.toLong())}；已拒绝导入"
 
     /**
      * 解密一个条目。密码不对时返回 null。
@@ -112,7 +157,8 @@ object StatementArchive {
         // 压缩长度可能为 0（置了数据描述符的写法），那就多喂一些字节给 inflater——
         // 它解完就停，尾部多余的字节不会有害
         val end = if (compressedSize > 0) {
-            (dataStart + ZipCrypto.HEADER_BYTES + compressedSize).coerceAtMost(bytes.size)
+            val limit = headerEnd.toLong() + compressedSize
+            if (limit > bytes.size) bytes.size else limit.toInt()
         } else {
             bytes.size
         }
@@ -124,22 +170,39 @@ object StatementArchive {
     }
 
     private fun inflate(source: ByteArray, offset: Int, length: Int, expectedSize: Int, method: Int): ByteArray? {
+        if (offset < 0 || length < 0 || offset.toLong() + length > source.size) return null
+        if (expectedSize > StatementLimits.MAX_ENTRY_BYTES) {
+            throw StatementLimitExceeded(
+                "压缩包内的条目解压后约 ${StatementLimits.humanSize(expectedSize.toLong())}，" +
+                    "超过上限 ${StatementLimits.humanSize(StatementLimits.MAX_ENTRY_BYTES.toLong())}；已拒绝导入",
+            )
+        }
         if (method == METHOD_STORED) {
             val size = if (expectedSize > 0) expectedSize else length
-            return source.copyOfRange(offset, (offset + size).coerceAtMost(source.size))
+            val end = (offset + minOf(size, length)).coerceAtMost(source.size)
+            return source.copyOfRange(offset, end)
         }
         if (method != METHOD_DEFLATE) return null
 
         val inflater = Inflater(true)
         return try {
             inflater.setInput(source, offset, length)
-            val out = java.io.ByteArrayOutputStream(if (expectedSize > 0) expectedSize else DEFAULT_BUFFER)
+            // **不按头部声明的 expectedSize 预分配**：那是攻击者可控的数字，
+            // 一个头部就能让 App 直接 OOM。从小缓冲起，产出超限立即停。
+            val out = java.io.ByteArrayOutputStream(DEFAULT_BUFFER)
             val buffer = ByteArray(DEFAULT_BUFFER)
             while (!inflater.finished()) {
                 val read = inflater.inflate(buffer)
                 if (read == 0) {
                     // 既没产出又没结束：输入不够或数据损坏，再试下去就是死循环
                     if (inflater.needsInput() || inflater.needsDictionary()) break
+                }
+                // 头部声明可能撒谎，实际产出不会——按真实解压量累计封顶
+                if (out.size().toLong() + read > StatementLimits.MAX_ENTRY_BYTES) {
+                    throw StatementLimitExceeded(
+                        "压缩包内的条目解压后超过 ${StatementLimits.humanSize(StatementLimits.MAX_ENTRY_BYTES.toLong())}；" +
+                            "疑似压缩炸弹，已拒绝导入",
+                    )
                 }
                 out.write(buffer, 0, read)
             }

@@ -165,7 +165,7 @@ data class ImportOutcome(
 )
 
 /** 「把文件变成解析结果」这一步的三种结局。 */
-private sealed interface ParseAttempt {
+internal sealed interface ParseAttempt {
     data class Parsed(val result: ParseResult) : ParseAttempt
 
     /** 文件读不了或密码不对——已经带上给用户看的说法。 */
@@ -173,6 +173,56 @@ private sealed interface ParseAttempt {
 
     /** 是加密账单但还没给密码。这不是错误，是流程里正常的一步。 */
     data object NeedsPassword : ParseAttempt
+}
+
+/**
+ * 把**不可信**的账单字节变成解析结果。
+ *
+ * 抽成顶层纯函数是为了能在不碰数据库的前提下测「拒绝」这条路——
+ * 压缩炸弹的验收就是「快速拒绝 + 可读理由」，而理由必须一直接到用户面前。
+ *
+ * 顺序有讲究：xlsx 也是 zip，而且里面没有 csv 条目——若先走 [StatementArchive]，
+ * 它只会报「压缩包里没有找到 CSV 条目」，用户看到一句与他手上的文件对不上话。
+ * 所以凡是有 zip 特征的文件都先按 xlsx 试一次，试不出来再走压缩包那条路。
+ */
+internal fun classifyStatement(
+    formats: List<StatementFormat>,
+    bytes: ByteArray,
+    password: String?,
+): ParseAttempt {
+    // 第一道闸：字节数。连解析都不必进——不可信文件不该先把内存占了再说
+    if (bytes.size > StatementLimits.MAX_ARCHIVE_BYTES) {
+        return ParseAttempt.Refused(
+            ImportPreparation.Unreadable(
+                "文件过大（${StatementLimits.humanSize(bytes.size.toLong())}），" +
+                    "超过上限 ${StatementLimits.humanSize(StatementLimits.MAX_ARCHIVE_BYTES.toLong())}；已拒绝导入",
+            ),
+        )
+    }
+
+    if (!StatementArchive.isZip(bytes)) {
+        return ParseAttempt.Parsed(CsvStatementParser(formats).parse(bytes))
+    }
+
+    // xlsx 内部有炸弹防护，越界会抛 StatementLimitExceeded——把它翻成给用户看的话
+    val xlsx = try {
+        XlsxStatementParser(formats).parse(bytes)
+    } catch (e: StatementLimitExceeded) {
+        return ParseAttempt.Refused(ImportPreparation.Unreadable(e.reason))
+    }
+    xlsx.takeIf { it.format != null }?.let { return ParseAttempt.Parsed(it) }
+
+    return when (val extracted = StatementArchive.open(bytes, password)) {
+        is ArchiveExtraction.Extracted ->
+            ParseAttempt.Parsed(CsvStatementParser(formats).parse(extracted.bytes))
+        ArchiveExtraction.NotZip ->
+            ParseAttempt.Parsed(CsvStatementParser(formats).parse(bytes))
+        is ArchiveExtraction.NeedsPassword -> ParseAttempt.NeedsPassword
+        is ArchiveExtraction.WrongPassword ->
+            ParseAttempt.Refused(ImportPreparation.WrongPassword(extracted.fileName))
+        is ArchiveExtraction.Failed ->
+            ParseAttempt.Refused(ImportPreparation.Unreadable(extracted.reason))
+    }
 }
 
 /**
@@ -200,34 +250,10 @@ class StatementImporter @Inject constructor(
     /**
      * 先把文件变成 [ParseResult]，认不出格式时如实说。
      *
-     * **顺序有讲究**：xlsx 也是 zip，而且里面没有 csv 条目——若先走
-     * [StatementArchive]，它只会报「压缩包里没有找到 CSV 条目」，用户看到一句
-     * 与他手上的文件对不上的话。所以凡是有 zip 特征的文件都先按 xlsx 试一次，
-     * 试不出来（加密 zip、普通 zip+csv）再走原来的路。
+     * 具体分类逻辑在顶层纯函数 [classifyStatement] 里，见那里的说明。
      */
-    private fun parseAny(request: ImportRequest): ParseAttempt {
-        val formats = catalog.formats()
-
-        if (!StatementArchive.isZip(request.bytes)) {
-            return ParseAttempt.Parsed(CsvStatementParser(formats).parse(request.bytes))
-        }
-
-        XlsxStatementParser(formats).parse(request.bytes)
-            .takeIf { it.format != null }
-            ?.let { return ParseAttempt.Parsed(it) }
-
-        return when (val extracted = StatementArchive.open(request.bytes, request.password)) {
-            is ArchiveExtraction.Extracted ->
-                ParseAttempt.Parsed(CsvStatementParser(formats).parse(extracted.bytes))
-            ArchiveExtraction.NotZip ->
-                ParseAttempt.Parsed(CsvStatementParser(formats).parse(request.bytes))
-            is ArchiveExtraction.NeedsPassword -> ParseAttempt.NeedsPassword
-            is ArchiveExtraction.WrongPassword ->
-                ParseAttempt.Refused(ImportPreparation.WrongPassword(extracted.fileName))
-            is ArchiveExtraction.Failed ->
-                ParseAttempt.Refused(ImportPreparation.Unreadable(extracted.reason))
-        }
-    }
+    private fun parseAny(request: ImportRequest): ParseAttempt =
+        classifyStatement(catalog.formats(), request.bytes, request.password)
 
     private suspend fun analyze(parsed: ParseResult, request: ImportRequest): ImportPreparation {
         val format = parsed.format
