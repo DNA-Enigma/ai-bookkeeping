@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     // AGP 9 起 Kotlin 支持已内建，不能再单独应用 kotlin.android 插件
@@ -20,10 +22,27 @@ android {
         versionName = "0.15.0"
     }
 
+    // 发布签名：材料在 keystore/（不进 git，见 keystore/README.txt）。
+    // properties 缺失时不禁用构建——release 出未签名包，由 tools/release-apk.sh 断言拦住。
+    signingConfigs {
+        val propsFile = rootProject.file("keystore/release.properties")
+        if (propsFile.exists()) {
+            create("release") {
+                val p = Properties().apply { propsFile.inputStream().use { load(it) } }
+                // properties 里 storeFile 是相对 keystore/ 目录的
+                storeFile = rootProject.file("keystore/${p.getProperty("storeFile", "release.keystore")}")
+                storePassword = p.getProperty("storePassword")
+                keyAlias = p.getProperty("keyAlias")
+                keyPassword = p.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
