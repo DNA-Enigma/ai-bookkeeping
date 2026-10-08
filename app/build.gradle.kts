@@ -20,6 +20,10 @@ android {
         targetSdk = 36
         versionCode = 16
         versionName = "0.17.0"
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     // 发布签名：材料在 keystore/（不进 git，见 keystore/README.txt）。
@@ -43,6 +47,17 @@ android {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("release")
+        }
+    }
+
+    // 原生构建用的 NDK 固定住（AGP 不写的话用它自己的默认值，升级 AGP 会静默换 NDK）
+    ndkVersion = "28.2.13676358"
+
+    // llama.cpp 走 CMake 原生构建（只编 libllama + ggml 核心库，见 src/main/cpp/CMakeLists.txt）
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
