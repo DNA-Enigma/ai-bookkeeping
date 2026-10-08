@@ -121,6 +121,44 @@ data class PreviewRow(
 /** 「将跳过」的统一文案——预览里出现的所有跳过标签都从这走，免得各写各的。 */
 const val LABEL_WILL_SKIP = "将跳过"
 
+/** 预览行标题：[primary] 是主标题，[secondary] 是补充信息（没有则为 null）。 */
+data class PreviewTitle(val primary: String, val secondary: String?)
+
+/**
+ * 商户名短于这个长度就当作**被截断的名字**。
+ *
+ * 真机实测：支付宝把个人收钱码的对方名截断成 1–2 字（596 笔里 27 笔 ≤2 字），
+ * 这种名字没有信息量，做主标题只会把有用的商品说明挤掉。
+ */
+const val PREVIEW_SHORT_MERCHANT_LENGTH = 2
+
+/**
+ * 预览行的标题怎么取。
+ *
+ * 两条规则，对商户名是否"有信息量"分别处理：
+ * - 商户够长（≥3 字）：商户做标题，**商品说明降为副标题**——它正是「买了什么」的来源，不能丢；
+ * - 商户是被截断的名字（≤2 字）：用商品说明做标题，截断名降为副标题。
+ *
+ * 抽成纯函数是为了能测——取错了不会报错，只会让用户对着一个孤零零的「飞」
+ * 不知道这是哪笔钱。
+ */
+fun previewTitle(row: PreviewRow): PreviewTitle {
+    val merchant = row.merchant?.trim().orEmpty()
+    val description = row.description?.trim().orEmpty()
+    val merchantInformative = merchant.length > PREVIEW_SHORT_MERCHANT_LENGTH
+    return when {
+        merchantInformative ->
+            PreviewTitle(merchant, description.takeIf { it.isNotEmpty() && it != merchant })
+
+        description.isNotEmpty() ->
+            PreviewTitle(description, merchant.takeIf { it.isNotEmpty() && it != description })
+
+        merchant.isNotEmpty() -> PreviewTitle(merchant, null)
+
+        else -> PreviewTitle("第 ${row.rowNumber} 行", null)
+    }
+}
+
 /** 把计划摊平成预览列表：先待导入，再疑似重复，最后是不入库的其他行。 */
 fun ImportPlan.toPreviewRows(): List<PreviewRow> = buildList {
     for (e in entries) {

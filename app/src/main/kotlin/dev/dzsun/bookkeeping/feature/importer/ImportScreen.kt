@@ -613,11 +613,10 @@ private fun PreviewRowCard(row: PreviewRow, currency: String) {
             )
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
+                val title = previewTitle(row)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        row.merchant?.takeIf { it.isNotBlank() }
-                            ?: row.description?.takeIf { it.isNotBlank() }
-                            ?: "第 ${row.rowNumber} 行",
+                        title.primary,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                     )
@@ -626,6 +625,15 @@ private fun PreviewRowCard(row: PreviewRow, currency: String) {
                         Spacer(Modifier.width(6.dp))
                         SkipBadge(badge)
                     }
+                }
+                // 副标题：商户够长时它是商品说明（「买了什么」的来源），
+                // 商户被截断时它是那个截断名。两种都不该被丢掉。
+                title.secondary?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 val subtitle = buildString {
                     append(formatPreviewDate(row.dateEpochDay))
