@@ -25,8 +25,10 @@ sealed interface AuthResult {
 }
 
 /**
- * 本地账号：内存 + 本次安装内持久化（SharedPreferences）。
- * 密码只做等长校验，**不做真加密**——这是演示级会话，不是安全存储。
+ * 本地账号：本次安装内持久化（SharedPreferences）。
+ *
+ * 账号体系还没接到服务端，所以校验是本机的；但**口令明文绝不落盘**——
+ * 落盘的是 [PasswordVerifier] 派生的不可逆校验值。见该文件的说明。
  */
 class LocalAuthRepository @Inject constructor(
     private val store: SessionStore,
@@ -35,9 +37,8 @@ class LocalAuthRepository @Inject constructor(
     override suspend fun isLoggedIn(): Boolean = store.email() != null
 
     override suspend fun signIn(email: String, password: String): AuthResult {
-        val saved = store.credentials()
-        return if (saved != null && saved.first == email && saved.second == password) {
-            store.setEmail(email)
+        val hash = store.passwordHash()
+        return if (store.email() == email && PasswordVerifier.verify(password, hash)) {
             AuthResult.Success
         } else {
             AuthResult.Failed("邮箱或密码不对，或者还没注册")
@@ -47,8 +48,8 @@ class LocalAuthRepository @Inject constructor(
     override suspend fun register(email: String, password: String): AuthResult {
         if (!email.contains("@")) return AuthResult.Failed("邮箱格式不正确")
         if (password.length < 6) return AuthResult.Failed("密码至少 6 位")
-        store.saveCredentials(email, password)
-        store.setEmail(email)
+        // 只落不可逆校验值；口令本身用完即弃
+        store.saveAccount(email, PasswordVerifier.hash(password))
         return AuthResult.Success
     }
 
@@ -69,7 +70,9 @@ class LocalAuthRepository @Inject constructor(
 interface SessionStore {
     fun email(): String?
     fun setEmail(email: String?)
-    fun credentials(): Pair<String, String>?
-    fun saveCredentials(email: String, password: String)
+
+    /** 不可逆的口令校验值（[PasswordVerifier.hash] 的产物），**不是口令**。 */
+    fun passwordHash(): String?
+    fun saveAccount(email: String, passwordHash: String)
     fun clearSession()
 }
