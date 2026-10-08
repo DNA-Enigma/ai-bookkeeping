@@ -18,8 +18,8 @@ android {
         applicationId = "dev.dzsun.bookkeeping"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.16.0"
+        versionCode = 16
+        versionName = "0.17.0"
     }
 
     // 发布签名：材料在 keystore/（不进 git，见 keystore/README.txt）。
