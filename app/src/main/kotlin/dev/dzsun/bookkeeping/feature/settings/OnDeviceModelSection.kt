@@ -38,13 +38,16 @@ import com.arm.aichat.AiChat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.dzsun.bookkeeping.core.designsystem.Art
+import dev.dzsun.bookkeeping.llm.ModelInstaller
 import dev.dzsun.bookkeeping.llm.SparkLlm
 import java.io.File
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 端侧模型（Spark-X2.5 · llama.cpp）的加载与试跑入口。
@@ -54,6 +57,7 @@ import kotlinx.coroutines.launch
  */
 sealed interface OnDeviceUiState {
     data object Idle : OnDeviceUiState
+    data class Installing(val progress: Float, val bytes: Long, val totalBytes: Long) : OnDeviceUiState
     data class Loading(val path: String) : OnDeviceUiState
     data class Ready(val path: String) : OnDeviceUiState
     data class Running(val path: String, val output: String) : OnDeviceUiState
@@ -68,6 +72,29 @@ sealed interface OnDeviceUiState {
     data class Failed(val message: String) : OnDeviceUiState
 }
 
+/** 把打包进 APK 的模型资产暴露成 [ModelAssets]。 */
+private class AssetModelAssets(private val context: Context) : dev.dzsun.bookkeeping.llm.ModelAssets {
+    override fun names(): List<String> {
+        // assets 没有递归 list，只认两层：顶层文件 + 一层子目录
+        val out = mutableListOf<String>()
+        val roots = context.assets.list("").orEmpty()
+        for (r in roots) {
+            val children = context.assets.list(r).orEmpty()
+            if (children.isEmpty()) out += r else children.forEach { out += "$r/$it" }
+        }
+        return out
+    }
+
+    override fun sizeOf(name: String): Long = try {
+        context.assets.openFd(name).declaredLength
+    } catch (_: Exception) {
+        -1L
+    }
+
+    override fun open(name: String) = context.assets.open(name)
+}
+
+
 @HiltViewModel
 class OnDeviceModelViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -78,6 +105,13 @@ class OnDeviceModelViewModel @Inject constructor(
 
     private val _state = MutableStateFlow<OnDeviceUiState>(OnDeviceUiState.Idle)
     val state: StateFlow<OnDeviceUiState> = _state.asStateFlow()
+
+    private val assets = AssetModelAssets(context)
+    private val installer = ModelInstaller(assets, File(context.filesDir, "models"))
+
+    /** 设备上当前能找到的模型文件；释放内置模型后刷新，UI 用它渲染状态行。 */
+    private val _modelFile = MutableStateFlow(findModel())
+    val modelFile: StateFlow<File?> = _modelFile.asStateFlow()
 
     /** 已加载的模型路径；null = 未加载（生成前必须先加载） */
     private var loadedPath: String? = null
@@ -100,12 +134,50 @@ class OnDeviceModelViewModel @Inject constructor(
     fun load() {
         val file = findModel()
         if (file == null) {
-            _state.value = OnDeviceUiState.Failed(
-                "找不到模型文件。先执行：adb push *.gguf " +
-                    "/sdcard/Android/data/dev.dzsun.bookkeeping/files/models/"
-            )
+            installBundledModel()
             return
         }
+        loadFile(file)
+    }
+
+    /**
+     * 设备上没有模型时的路：把打包进 APK 的那份释放到私有目录，然后接着加载。
+     *
+     * 这是「装上就能用」的那一步——不指望用户会 `adb push` 一个 1 GB 的文件。
+     */
+    private fun installBundledModel() {
+        viewModelScope.launch {
+            val total = withContext(Dispatchers.IO) { installer.expectedBytes() }
+            _state.value = OnDeviceUiState.Installing(0f, 0L, total)
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    installer.ensure { p ->
+                        // StateFlow 写入线程安全；UI 在主线程 collect，这里直接回写进度
+                        val done = if (total > 0) (p * total).toLong() else -1L
+                        _state.value = OnDeviceUiState.Installing(p, done, total)
+                    }
+                }
+            } catch (e: Throwable) {
+                _state.value = OnDeviceUiState.Failed("释放模型失败：${e.message ?: e.javaClass.simpleName}")
+                Log.e(TAG, "install bundled model failed", e)
+                return@launch
+            }
+            _modelFile.value = findModel()
+            when {
+                result is ModelInstaller.Result.Failed -> {
+                    _state.value = OnDeviceUiState.Failed(result.message)
+                    Log.w(TAG, "install bundled model failed: ${result.message}")
+                }
+                _modelFile.value != null -> {
+                    Log.i(TAG, "bundled model installed: ${_modelFile.value!!.absolutePath}")
+                    loadFile(_modelFile.value!!)
+                }
+                else -> _state.value = OnDeviceUiState.Failed("释放后仍找不到模型文件")
+            }
+        }
+    }
+
+    private fun loadFile(file: File) {
         viewModelScope.launch {
             _state.value = OnDeviceUiState.Loading(file.absolutePath)
             try {
@@ -183,10 +255,10 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
     val p = Art.colors
     var prompt by remember { mutableStateOf(DEFAULT_PROMPT) }
 
-    val model = remember { viewModel.findModel() }
+    val model by viewModel.modelFile.collectAsStateWithLifecycle()
     val modelLine = when {
-        model != null -> "模型：${model.name}（${model.length() / 1024 / 1024} MB）"
-        else -> "模型：未找到 · adb push 到 files/models/"
+        model != null -> "模型：${model!!.name}（${model!!.length() / 1024 / 1024} MB）"
+        else -> "模型：内置 · 点「加载模型」会自动释放到应用目录（首次约 1 GB）"
     }
     Text(modelLine, style = TextStyle(fontSize = 12.sp, fontFamily = FontFamily.Monospace), color = p.ink3)
     Spacer(Modifier.height(10.dp))
@@ -194,10 +266,13 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
     Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
         ArtActionChip(
             label = when (state) {
+                is OnDeviceUiState.Installing -> "释放中 ${(state.progress * 100).toInt()}%"
                 is OnDeviceUiState.Loading -> "加载中…"
                 else -> "加载模型"
             },
-            enabled = state !is OnDeviceUiState.Loading && state !is OnDeviceUiState.Running,
+            enabled = state !is OnDeviceUiState.Installing &&
+                state !is OnDeviceUiState.Loading &&
+                state !is OnDeviceUiState.Running,
             onClick = viewModel::load,
         )
         ArtActionChip(
@@ -205,12 +280,16 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
                 is OnDeviceUiState.Running -> "生成中…"
                 else -> "生成"
             },
-            enabled = state !is OnDeviceUiState.Loading && state !is OnDeviceUiState.Running,
+            enabled = state !is OnDeviceUiState.Installing &&
+                state !is OnDeviceUiState.Loading &&
+                state !is OnDeviceUiState.Running,
             onClick = { viewModel.generate(prompt) },
         )
         ArtActionChip(
             label = "卸载",
-            enabled = state !is OnDeviceUiState.Loading && state !is OnDeviceUiState.Running,
+            enabled = state !is OnDeviceUiState.Installing &&
+                state !is OnDeviceUiState.Loading &&
+                state !is OnDeviceUiState.Running,
             onClick = viewModel::unload,
         )
     }
@@ -233,6 +312,13 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
     when (state) {
         is OnDeviceUiState.Idle ->
             StatusText("未加载 · 点「加载模型」", p.ink3)
+        is OnDeviceUiState.Installing -> {
+            val pct = if (state.totalBytes > 0) "${(state.progress * 100).toInt()}%" else "…"
+            val mb = if (state.totalBytes > 0) {
+                "${state.bytes / 1024 / 1024} / ${state.totalBytes / 1024 / 1024} MB · "
+            } else ""
+            StatusText("正在释放内置模型 $mb$pct（首次约 1 GB，稍等）", p.accent)
+        }
         is OnDeviceUiState.Loading ->
             StatusText("正在加载模型（首次读 1GB+ 文件，耐心等）…", p.accent)
         is OnDeviceUiState.Ready ->

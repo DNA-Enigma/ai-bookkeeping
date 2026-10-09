@@ -18,8 +18,8 @@ android {
         applicationId = "dev.dzsun.bookkeeping"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.17.0"
+        versionCode = 17
+        versionName = "0.18.0"
 
         ndk {
             // 真机只发 arm64（包体小、也是目标机型的架构）。
@@ -74,6 +74,22 @@ android {
         compose = true
         // CaptureClient 把版本号报给调度层，用 BuildConfig 保证与构建一致
         buildConfig = true
+    }
+
+    // 端侧模型（GGUF）打进 APK，装上即用——不走「用户自己 adb push」那条路。
+    // 资产放在**仓库外**的 ~/projects/model-assets/（1.1 GB，绝不能进 git），
+    // 这里用硬链接保持同一 inode，改模型不用重拷。
+    // 目录不存在时 AGP 会跳过该 srcDir，所以没有模型也能正常构建（只是端侧功能退化）。
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(rootProject.file("../model-assets"))
+        }
+    }
+
+    androidResources {
+        // .gguf 本身已是压缩格式，再 deflate 一遍纯属浪费 CPU，
+        // 且 APK 内存映射读取要求它按 STORED 存放。
+        noCompress += "gguf"
     }
 
     packaging {

@@ -60,6 +60,7 @@
 | 依赖要新 SDK | `requires ... compile against version 37 or later` | `compileSdk = 37`；platform 名带次版本，如 `android-37.2` |
 | 图标依赖 | `Unresolved reference 'ChevronRight'` | `material-icons-extended` **必须保留**（已冻结在 BOM 的 1.7.8，但界面需要它） |
 | 外网很慢 | Gradle 发行包几十 KB/s | Gradle 走华为云镜像；JDK 走清华镜像（脚本里已配好） |
+| 端侧模型找不到 | 设置页报「找不到模型文件」 | 模型已内置进 APK：资产在**仓库外** `~/projects/model-assets/models/`（硬链接自 `~/projects/models/`，1.1 GB **绝不进 git**），gradle `assets.srcDir` 引用 + `noCompress += "gguf"`；首装点「加载模型」自动释放到 `filesDir/models/` |
 
 `material-icons-extended` 1.7.8 里**没有** `automirrored` 版本的 `ChevronRight`，
 只有 `filled`/`outlined`/`rounded`/`sharp`/`twotone`。
@@ -1379,3 +1380,52 @@ prompt 只说「'这个月'换算成具体日期」，却没告诉模型今天�
 - **`limit` / `group_by` 的默认值只在客户端**：契约 description 里没写具体数值，
   两边理解不一致会表现成「分组条数对不上」。建议下次修订时把默认值写进
   `bookkeeping_ledger_query.json` 的 description。
+
+### 2026-10-09 · 界面这边（0.18.0：模型内置进 APK，装上就能用）
+
+**用户报的问题：设置页红字「找不到模型文件，先 adb push …」——这条路本身就是错的。**
+没人应该为了用一个功能手动推 1 GB 文件。改成**模型打包进 APK，首装点「加载模型」自动释放**。
+
+#### 改了什么
+
+| 文件 | 归属 | 改了什么 |
+|---|---|---|
+| `llm/ModelInstaller.kt` | 界面 | 新增：把内置 GGUF 释放到 `filesDir/models/` |
+| `feature/settings/OnDeviceModelSection.kt` | 界面 | `Installing` 状态 + 进度、`modelFile` Flow、找不到模型时走释放而不是报错 |
+| `app/build.gradle.kts` | 共用 | `assets.srcDir` 指向仓库外 `~/projects/model-assets`、`noCompress += "gguf"`、版本 **0.18.0**（versionCode 17） |
+| `app/src/test/.../ModelInstallerTest.kt` | 界面 | 新增 8 个用例 |
+
+**模型不进 git。** 资产目录在仓库外（`~/projects/model-assets/models/`，
+硬链接自 `~/projects/models/`，同一 inode，改模型不用重拷），gradle 引用它。
+目录不存在时 AGP 跳过该 srcDir，所以没有模型的机器照样能构建——只是端侧功能退化。
+
+#### 四条刻意的口径
+
+1. **先写 `.part`，校验字节数后才改名。** 半截文件不许叫正式文件名，否则下次
+   `exists()` 为真却是个残缺模型，llama 加载时才炸——那时没人会想到是释放中断过。
+2. **已存在且字节数相符就跳过**，不重复写 1 GB。
+3. **空间不足提前拦**，一个字节都不写（实测报「模型 1056 MB，可用 516 MB」，
+   `files/models` 里 `total 0`）。
+4. **任何失败都清掉 `.part`**，宁可下次重来，不留 1 GB 垃圾。
+
+#### 验证（模拟器 x86_64，`-PincludeX86=true`）
+
+- `:app:testDebugUnitTest` 全绿，新增 `ModelInstallerTest` **8/8**
+- APK 内 `grep '释放内置模型' classes*.dex` 命中 1（`classes13.dex`），证明装的不是旧包
+- APK 1.1 G，`assets/models/Spark-X2.5-1.7B-Q4_K_M.gguf` 按 STORED 存放
+- 机上模型先挪到 `files/old/` 制造零模型态 → 点「加载模型」：
+  `SparkLlm: bundled model installed: …/files/models/Spark-X2.5-1.7B-Q4_K_M.gguf`
+  → `model loaded (1056 MB)`，文件 1107457856 字节与源一致，**无 `.part` 残留**
+- 点「生成」：`firstToken=8201ms total=17319ms chunks=25`，
+  输出「打车28元…可归为交通支出」，`AndroidRuntime` FATAL **0**
+- 空间不足分支在真机上真实触发过一次（见上第 3 条）
+- 截图：`docs/screenshots/2026-10-09/`
+
+#### 遗留
+
+1. **模拟器 `/data` 满了**（5.8 G 用了 5.1 G，剩 516 M），里面 `files/old/`、`files/old2/`
+   各躺着 1.1 G 我验证时挪出来的副本。用户说先别删，**下次要再验首装释放得先腾空间**。
+2. **`Installing` 释放进度那一帧没截到**——释放只花 4 s，连拍全落在之后的
+   「正在加载模型」。日志与字节数是硬证据，进度 UI 只在空间不足那张截图里间接可见。
+3. **真机 arm64 没验过**，本次全部证据来自 x86_64 模拟器。
+4. 升版本号只改了 gradle，**0.18.0 的包还没装回模拟器**（装的是 0.17.0 + 本次代码）。
