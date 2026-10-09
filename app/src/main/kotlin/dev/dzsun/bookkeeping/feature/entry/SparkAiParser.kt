@@ -1,7 +1,5 @@
 package dev.dzsun.bookkeeping.feature.entry
 
-import android.content.Context
-import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.dzsun.bookkeeping.llm.SparkSession
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,29 +35,15 @@ data class ParseOutcome(
 @Singleton
 class SparkAiParser @Inject constructor(
     private val session: SparkSession,
-    @ApplicationContext private val context: Context,
 ) : AiParser {
 
     private val fallback = LocalAiParser()
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    /** 应用默认科目表里的支出/收入分类名。 */
-    private val expenseCategories: List<String> by lazy { loadAccounts("expense") }
-    private val incomeCategories: List<String> by lazy { loadAccounts("income") }
-
-    private fun loadAccounts(kind: String): List<String> = runCatching {
-        val text = context.assets.open("default_accounts.json")
-            .bufferedReader().use { it.readText() }
-        val doc = json.parseToJsonElement(text)
-        val accounts = (doc as? kotlinx.serialization.json.JsonObject)
-            ?.get("accounts") as? kotlinx.serialization.json.JsonArray ?: return@runCatching emptyList()
-        accounts.mapNotNull { el ->
-            val o = el as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
-            val type = (o["type"] as? kotlinx.serialization.json.JsonPrimitive)?.content
-            val name = (o["name"] as? kotlinx.serialization.json.JsonPrimitive)?.content
-            if (type != null && name != null && type.equals(kind, true)) name else null
-        }
-    }.getOrDefault(emptyList())
+    // 分类表统一由 SparkSession 持有：它同时进系统提示，对话/解析共用同一份，
+    // 否则两处提示词不一致会触发重新加载（模拟器实测 65 秒）。
+    private val expenseCategories: List<String> get() = session.expenseCategories
+    private val incomeCategories: List<String> get() = session.incomeCategories
 
     override suspend fun parse(raw: String): List<ParsedEntry> = parseWithSource(raw).entries
 
@@ -71,20 +55,21 @@ class SparkAiParser @Inject constructor(
     ): ParseOutcome {
         if (raw.isBlank()) return ParseOutcome(emptyList(), ParseSource.RULES, null, 0L)
 
-        val prompt = SparkSession.systemPrompt(expenseCategories, incomeCategories)
         val t0 = System.currentTimeMillis()
 
         // 初始化（读模型 + 解码系统提示）单独给宽超时：系统提示里带分类表，
         // 模拟器实测要 60s+ 才解码完；用生成超时去卡它会把初始化掐死，
         // 引擎卡在 ProcessingSystemPrompt，之后每条都 1ms 快速失败、全落规则兜底。
         val ready = withTimeoutOrNull(initTimeoutMs) {
-            runCatching { session.ensureReady(prompt) }.getOrDefault(false)
+            runCatching { session.ensureReady() }.getOrDefault(false)
         } ?: false
         val initMs = System.currentTimeMillis() - t0
 
         val modelOut = if (ready) {
             withTimeoutOrNull(genTimeoutMs) {
-                runCatching { session.complete(raw, SparkSession.DEFAULT_MAX_TOKENS) }.getOrNull()
+                runCatching {
+                    session.complete(SparkSession.MODE_PARSE + raw, SparkSession.DEFAULT_MAX_TOKENS)
+                }.getOrNull()
             }
         } else null
         val elapsed = System.currentTimeMillis() - t0
@@ -109,6 +94,14 @@ class SparkAiParser @Inject constructor(
         val e = text.lastIndexOf(']')
         return if (s in 0 until e) text.substring(s, e + 1) else null
     }
+
+    /**
+     * 解析模型输出里的账目数组。**公开给阿账对话复用** ——
+     * 对话模式下模型也可能直接吐数组（用户其实是在报一笔账）。
+     *
+     * @return null = 输出里没有合法数组（不是「空数组」，是解析不了）
+     */
+    fun decodeEntries(output: String): List<ParsedEntry>? = decode(output)
 
     private fun decode(output: String): List<ParsedEntry>? {
         val arr = extractArray(output) ?: return null

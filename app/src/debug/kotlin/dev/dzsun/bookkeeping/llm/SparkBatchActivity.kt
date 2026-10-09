@@ -4,8 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
-import dev.dzsun.bookkeeping.feature.entry.LocalAiParser
-import dev.dzsun.bookkeeping.feature.entry.SparkAiParser
+import dev.dzsun.bookkeeping.feature.chat.ChatAiEntryPoint
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,8 +64,11 @@ class SparkBatchActivity : Activity() {
         val cases = json.decodeFromString<List<BatchCase>>(casesFile.readText())
         Log.i(TAG, "开始评估 label=$label 共 ${cases.size} 条 → ${casesFile.absolutePath}")
 
-        // 与正式记账同一个解析器、同一份系统提示
-        val parser = SparkAiParser(SparkSession(this), this)
+        // 与正式记账**同一个单例解析器、同一份系统提示**（Hilt EntryPoint 取），
+        // 否则自己 new 一份会把模型再加载一遍（模拟器实测 65s）
+        val parser = dagger.hilt.android.EntryPointAccessors
+            .fromApplication(applicationContext, ChatAiEntryPoint::class.java)
+            .sparkAiParser()
         val rows = ArrayList<BatchRow>(cases.size)
 
         cases.forEachIndexed { idx, c ->

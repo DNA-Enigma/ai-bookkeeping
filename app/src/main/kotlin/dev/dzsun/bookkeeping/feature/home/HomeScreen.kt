@@ -27,7 +27,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import dev.dzsun.bookkeeping.feature.chat.AiFloatPanel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -95,6 +97,9 @@ fun HomeScreen(
     // 数据存在性判据：只用 uiState 已有字段，不另起全局状态。
     val hasAnyLedger = ui.entries.isNotEmpty()
 
+    // AI 悬浮面板：点右下角的球原地展开，不再跳页
+    var aiPanel by remember { mutableStateOf(false) }
+
     Box(Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
@@ -150,9 +155,21 @@ fun HomeScreen(
     }
 
         AiOrb(
-            onClick = onAskClick,
+            onClick = { aiPanel = true },
             modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 92.dp),
         )
+
+        if (aiPanel) {
+            AiFloatPanel(
+                onClose = { aiPanel = false },
+                // 从面板里跳走时先收起，免得回来发现面板压在页面上
+                onOpenChat = { aiPanel = false; onOpenChat() },
+                onAskClick = { aiPanel = false; onAskClick() },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 164.dp),
+            )
+        }
     }
 }
 

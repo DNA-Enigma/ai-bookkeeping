@@ -46,6 +46,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -56,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dagger.hilt.android.EntryPointAccessors
 import dev.dzsun.bookkeeping.core.designsystem.*
 import dev.dzsun.bookkeeping.feature.ask.AskStage
 import dev.dzsun.bookkeeping.feature.ask.AskViewModel
@@ -104,6 +106,13 @@ fun ChatScreen(
     val messages = remember { mutableStateListOf<ChatMsg>() }
     var typing by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
+
+    // 本地模型单例（EntryPoint 取，不能自己 new —— 会绕过单例导致重复加载模型）。
+    // LocalContext 必须在 remember **外面**读：lambda 不是 @Composable 作用域。
+    val appContext = LocalContext.current
+    val azhang = remember {
+        EntryPointAccessors.fromApplication(appContext, ChatAiEntryPoint::class.java).azhangChat()
+    }
 
     fun scroll() {
         scope.launch {
@@ -181,31 +190,65 @@ fun ChatScreen(
         }
     }
 
-    fun userSay(text: String) {
-        messages += ChatMsg.Text(false, text); scroll()
-        when (val intent = classifyChatInput(text)) {
-            ChatIntent.Advice ->
-                // 不编金额：省钱建议要真算就得看真实账目。先把用户引到能真答的问题上。
-                agentSay(
-                    "省钱这事得看你的真实账目，我不编数字。\n" +
-                        "试着问：「这个月餐饮花了多少」「哪类花得最多」，我看完再一起想办法。",
-                    900,
-                )
+    /** 模型不可用时的原逻辑：分类、寒暄、建议全部退回规则，保证永远有回应。 */
+    fun legacyReply(text: String, intent: ChatIntent) {
+        when (intent) {
+            ChatIntent.Advice -> agentSay(
+                "省钱这事得看你的真实账目，我不编数字。\n" +
+                    "试着问：「这个月餐饮花了多少」「哪类花得最多」，我看完再一起想办法。",
+                900,
+            )
 
             is ChatIntent.Record -> entryParse(text, intent.amountText)
-
-            // 打招呼也回一句像样的，并顺手告诉他这个入口能干什么。
             is ChatIntent.SmallTalk -> agentSay(intent.reply, 600)
-
-            is ChatIntent.Ask -> {
-                // 真实问账链路：调度层 → Room → 中文答案
-                viewModel.onQuestionChange(intent.question)
-                viewModel.onAsk()
-            }
+            is ChatIntent.Ask -> {} // Ask 在 userSay 里已接管，不会走到这里
         }
     }
 
-    LaunchedEffect(Unit) { agentSay("下午好。想记账、查账，还是聊聊怎么省钱？说一句就行。", 500) }
+    fun userSay(text: String) {
+        messages += ChatMsg.Text(false, text); scroll()
+        val intent = classifyChatInput(text)
+
+        // 查账：直接进本地 SQL 链路 —— **计算交给账本，模型不算数**。
+        // 答不出来时 AskViewModel 会再让模型接一句不涉及金额的话。
+        if (intent is ChatIntent.Ask) {
+            viewModel.onQuestionChange(intent.question)
+            viewModel.onAsk()
+            return
+        }
+
+        // 其余交给本机模型：认出是账就出卡片，否则正常接话。
+        // 模型不可用时退回原来的规则判断与话术，聊天页不能哑掉。
+        scope.launch {
+            typing = true; scroll()
+            val turn = azhang.turn(text)
+            typing = false
+            when (turn) {
+                is AzhangTurn.Entry -> {
+                    val e = turn.entries.first()
+                    messages += ChatMsg.EntryCard(
+                        ParsedEntry(e.categoryName, e.note.ifBlank { text }, e.amountText),
+                        text,
+                    )
+                    if (turn.entries.size > 1) {
+                        messages += ChatMsg.Text(true, "识别到 ${turn.entries.size} 笔，先记第一笔，其余的再补。")
+                    }
+                }
+
+                is AzhangTurn.Reply -> messages += ChatMsg.Text(true, turn.body)
+
+                AzhangTurn.Unavailable -> legacyReply(text, intent)
+            }
+            scroll()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        agentSay("下午好。想记账、查账，还是聊聊怎么省钱？说一句就行。", 500)
+        // 预热本机模型：加载模型 + 解码系统提示要花时间，
+        // 等用户打完字再开始就太晚了。失败不打紧，真调用时会重试并降级。
+        azhang.warmUp()
+    }
 
     Column(Modifier.fillMaxSize().background(p.bg)) {
         /* 头部 */

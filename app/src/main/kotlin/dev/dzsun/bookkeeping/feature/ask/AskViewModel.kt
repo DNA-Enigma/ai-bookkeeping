@@ -10,6 +10,8 @@ import dev.dzsun.bookkeeping.core.network.LedgerQueryClient
 import dev.dzsun.bookkeeping.core.network.LedgerQueryOutcome
 import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.core.platform.Clock
+import dev.dzsun.bookkeeping.feature.chat.AzhangChat
+import dev.dzsun.bookkeeping.feature.chat.AzhangTurn
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,9 +74,18 @@ class AskViewModel @Inject constructor(
     private val translator: LocalQueryTranslator,
     private val runner: LedgerQueryRunner,
     private val clock: Clock,
+    private val azhang: AzhangChat,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AskUiState())
+
+    /**
+     * 问账页是 AI 悬浮球的落点，也就是用户最可能**第一个**碰到模型的地方——
+     * 进来就预热，省得他打完字才开始加载模型。
+     */
+    init {
+        viewModelScope.launch { azhang.warmUp() }
+    }
     val state: StateFlow<AskUiState> = _state.asStateFlow()
 
     fun onQuestionChange(text: String) {
@@ -100,12 +111,37 @@ class AskViewModel @Inject constructor(
         // 服务端给不出查询结构时退到本地词法翻译。翻得出来就照常作答，
         // 翻不出来才说「答不了」——原因用白名单文案，不透传服务端 detail。
         val local = translator.translate(question, clock.today())
-            ?: return AskStage.Unavailable(
-                question,
-                UserFacingErrors.ASK,
-            )
+            ?: return askWithModel(question)
 
         return answer(question, local, local = true)
+    }
+
+    /**
+     * 词法翻译不出来 → 交给**本机模型**接话（问账页也是用本地 AI 的页面）。
+     *
+     * 口径必须守住：SQL 算不出来的问题，模型**也不许编数字**。
+     * 它要么给一句不涉及金额的回答，要么自己认领「查账」/给不出 → 照实返回 [AskStage.Unavailable]，
+     * 让界面说清为什么答不了，而不是拿一句像模像样的话冒充账目答案。
+     */
+    private suspend fun askWithModel(question: String): AskStage {
+        val turn = runCatching {
+            azhang.turn(question, genTimeoutMs = MODEL_GEN_TIMEOUT_MS)
+        }.getOrDefault(AzhangTurn.Unavailable)
+
+        val reply = turn as? AzhangTurn.Reply
+            ?: return AskStage.Unavailable(question, UserFacingErrors.ASK)
+        // 模型自己说「这得查账」，或者压根没答出来 → 如实答不了
+        if (reply.isLedgerQuery || reply.body.isBlank()) {
+            return AskStage.Unavailable(question, UserFacingErrors.ASK)
+        }
+        return AskStage.Answered(
+            AskAnswer(
+                question = question,
+                headline = reply.body,
+                detail = emptyList(),
+                footnote = MODEL_NOTE,
+            ),
+        )
     }
 
     private suspend fun answer(question: String, query: LedgerQuery, local: Boolean): AskStage {
@@ -126,5 +162,9 @@ class AskViewModel @Inject constructor(
 
     private companion object {
         const val LOCAL_NOTE = "这句话是按本地规则理解的，没有经过 AI 服务"
+        const val MODEL_NOTE = "这句由本机模型回答，没有查账本"
+
+        /** 问账是即时场景：宁可答不了，也不让用户盯着转圈。 */
+        const val MODEL_GEN_TIMEOUT_MS = 20_000L
     }
 }
