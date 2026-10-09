@@ -290,11 +290,20 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     common_chat_msg new_msg;
     new_msg.role = role;
     new_msg.content = content;
-    auto formatted = common_chat_format_single(
-            g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
-    chat_msgs.push_back(new_msg);
-    LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
-    return formatted;
+    // Spark-X2.5 的 chat_template 用了 Jinja 宏 / namespace / 过滤器，非 jinja 路径
+    // 会抛 `this custom template is not supported, try using --jinja`；这个异常在 JNI 边界
+    // 没人接 → 直接 SIGABRT 把整个 App 带走。所以：①开 jinja ②兜住异常降级成裸文本。
+    try {
+        auto formatted = common_chat_format_single(
+                g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ true);
+        chat_msgs.push_back(new_msg);
+        LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
+        return formatted;
+    } catch (const std::exception &e) {
+        LOGe("%s: template formatting failed (%s); falling back to raw text", __func__, e.what());
+        chat_msgs.push_back(new_msg);
+        return content;
+    }
 }
 
 /**

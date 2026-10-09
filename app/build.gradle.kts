@@ -22,7 +22,11 @@ android {
         versionName = "0.17.0"
 
         ndk {
+            // 真机只发 arm64（包体小、也是目标机型的架构）。
+            // x86_64 是**模拟器专用**的开关：`-PincludeX86=true` 时才编进去，
+            // 默认关闭，不改变发布产物。CMake 侧对 x86_64 有独立分支（关 KleidiAI）。
             abiFilters += "arm64-v8a"
+            if (project.findProperty("includeX86") == "true") abiFilters += "x86_64"
         }
     }
 
@@ -74,6 +78,14 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        jniLibs {
+            // 必须把 .so 解压到 nativeLibraryDir：llama.cpp 运行时用
+            // ggml_backend_load_all_from_path(nativeLibraryDir) 去 dlopen 后端库。
+            // extractNativeLibs=false 时该目录是空的（库只在 APK 里内存映射），
+            // 结果是 "no backends are loaded" → 模型加载直接失败。
+            // System.loadLibrary 不受影响，所以这个坑编译期完全看不出来，真机同样会踩。
+            useLegacyPackaging = true
+        }
     }
 }
 

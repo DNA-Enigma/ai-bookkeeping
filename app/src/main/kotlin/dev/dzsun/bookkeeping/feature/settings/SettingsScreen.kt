@@ -58,6 +58,8 @@ fun SettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val onDeviceViewModel: OnDeviceModelViewModel = hiltViewModel()
+    val onDeviceState by onDeviceViewModel.state.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -83,7 +85,10 @@ fun SettingsScreen(
         SectionHeader(5, "自动化")
         AutomationSection(state, viewModel)
         Spacer(Modifier.height(40.dp))
-        SectionHeader(6, "关于")
+        SectionHeader(6, "端侧模型")
+        OnDeviceModelSection(state = onDeviceState, viewModel = onDeviceViewModel)
+        Spacer(Modifier.height(40.dp))
+        SectionHeader(7, "关于")
         AboutSection(state, viewModel, onSignOut)
         Spacer(Modifier.height(110.dp))
     }
