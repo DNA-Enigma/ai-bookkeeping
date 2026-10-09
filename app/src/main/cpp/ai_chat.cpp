@@ -294,14 +294,23 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     // 会抛 `this custom template is not supported, try using --jinja`；这个异常在 JNI 边界
     // 没人接 → 直接 SIGABRT 把整个 App 带走。所以：①开 jinja ②兜住异常降级成裸文本。
     try {
-        auto formatted = common_chat_format_single(
-                g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ true);
         chat_msgs.push_back(new_msg);
-        LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
+        // 用 inputs 结构而不是 common_chat_format_single()，是为了拿到 enable_thinking 开关：
+        // Spark-X2.5 的模板默认 enable_thinking=true → 生成提示以 `` 开头，
+        // 模型会先长篇思考，把 token 预算吃光（实测 192 token 还没吐 JSON），
+        // 于是上层解析不到数组、整条降级成规则。记账抽取要的是直接答案。
+        common_chat_templates_inputs inputs;
+        // 注意：只放 new_msg。chat_msgs 仅作记录，不进格式化输入。
+        inputs.messages            = { new_msg };
+        inputs.add_generation_prompt = (role == ROLE_USER);   // 与原逻辑一致：只有末尾是用户才补 <|Bot|>
+        inputs.use_jinja           = true;
+        inputs.enable_thinking     = false;                   // 关思考：省 token 也稳 JSON（可一行改回 true）
+        auto formatted = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
+        LOGi("%s: Formatted and added %s message (thinking=%s): \n%s\n",
+             __func__, role.c_str(), "off", formatted.c_str());
         return formatted;
     } catch (const std::exception &e) {
         LOGe("%s: template formatting failed (%s); falling back to raw text", __func__, e.what());
-        chat_msgs.push_back(new_msg);
         return content;
     }
 }

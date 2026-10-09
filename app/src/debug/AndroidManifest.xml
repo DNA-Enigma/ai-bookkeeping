@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  debug 源集专用清单：批量评估入口只在 debug 包里注册。
+  release 构建不包含本文件，所以 SparkBatchActivity 不会出现在发布产物中。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <activity
+            android:name="dev.dzsun.bookkeeping.llm.SparkBatchActivity"
+            android:exported="true"
+            android:label="Spark 批量评估"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+    </application>
+
+</manifest>
