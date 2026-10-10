@@ -55,3 +55,25 @@
   未自清）+ 1.0G 机上模型 → 本轮再次走「47M 小包过渡 → 删模型 → 装 1.1G 完整包」流程。
   **建议**：TC-04 的备份步骤改为用完即删，或恢复路径直接走内置资产（本次即如此）。
 - 本记录全部为模拟器口径；**arm64 真机仍未验**（验收 G 未执行）。
+
+---
+
+## 追加：遗留1（加载被取消后设置页卡在「正在加载」）修复验收 · 2026-10-10 16:46
+
+修复提交：`05c7bfb`（SparkSession 属主自愈监视器）· 版本：**0.21.1 (versionCode 21)**（`5dc42f5`）
+门槛：`tools/build.sh -PincludeX86=true :app:testDebugUnitTest :app:assembleDebug` → BUILD SUCCESSFUL，
+**530 单测 0 失败**（新增 `SparkSessionClaimTest`，含安全底线「没见过 ProcessingSystemPrompt 的 ModelReady 不许认领」）。
+
+### 复现-修复对照（同一脚本 repro4.sh，模拟器 x86_64）
+
+| | 修复前（0.21.0，15:11-15:14） | 修复后（0.21.1，16:44-16:46） |
+|---|---|---|
+| 操作 | 卸载 → 对话页触发加载 → 立刻返回取消 | 同左 |
+| 引擎日志 | `System prompt processed!`（自行跑完） | `System prompt processed!` |
+| 属主动作 | 无（`_loadedKey` 停在 null） | `SparkSession: 调用方已取消，属主自行认领提示词` |
+| **设置页状态** | **正在加载模型（首次读1GB+文件…）**（全程不翻正，需进对话页救场） | **已加载 · 可以生成了**（自行翻正，未进对话页） |
+| FATAL | 0 | 0 |
+
+- 判据脚本：`等待 System prompt processed 计数 2 → 3`（旧计数不掺和）后 8s 读设置页状态行。
+- 截图：`05-before-fix-stuck.png`（修复前卡住） / `06-after-fix-selfhealed.png`（修复后自愈）
+- 首轮复现脚本曾因「按出现过与否计数」误判就绪而截错状态，已修正为计数增长——记录在此以免后人把那张旧图当证据。
