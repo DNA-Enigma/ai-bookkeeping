@@ -150,12 +150,21 @@ class AzhangChatRepairTest {
             "这顿花了 ¥38",
             "28元", // 元
             "打车大概 28元",
+            "二十八元", // 中文数字 + 元
+            "一元也是钱",
             "占总支出 44%", // %
             "44%",
             "找零 3.50", // \d+\.\d{2}
             "3.50",
             "￥12",
         ).forEach { assertNull("「$it」不能当回复", displayablePlainText(it)) }
+    }
+
+    @Test
+    fun `「元」字不构成金额时不拦`() {
+        // 裸「元」会误伤日常句子：护栏拦的是编造的数字，不是这个字
+        listOf("元旦快乐，新的一年账要记清", "今天是元旦", "欧元汇率不用你算")
+            .forEach { assertEquals("「$it」应可展示", it, displayablePlainText(it)) }
     }
 
     @Test
