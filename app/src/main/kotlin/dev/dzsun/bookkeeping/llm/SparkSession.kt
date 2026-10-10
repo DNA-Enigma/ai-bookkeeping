@@ -9,10 +9,14 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import com.arm.aichat.InferenceEngine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -89,7 +93,8 @@ sealed interface SessionState {
  *  - **Error 优先**：引擎报错时无论加载与否，先把原因亮出来；
  *  - 生成类状态（Generating / ProcessingUserPrompt）→ Generating；
  *  - 准备类状态（加载/解码提示/卸载/基准测试）→ Loading；
- *  - ModelReady 且提示词已加载 → Ready；ModelReady 但没加载（不可能长期出现）按 Loading；
+ *  - ModelReady 且提示词已加载 → Ready；ModelReady 但没加载：调用方取消后由属主自愈认领
+ *    （见 [shouldClaimInFlight]），未认领前按 Loading 展示；
  *  - 其余（Uninitialized / Initialized）：没加载就是 Idle，
  *    加载了却回到这里说明引擎被复位，按 Loading 算、等下一次 ensureReady 接上。
  */
@@ -114,6 +119,45 @@ internal fun sessionStateOf(engineState: InferenceEngine.State, loaded: Boolean)
 
         else -> if (loaded) SessionState.Loading else SessionState.Idle
     }
+
+/**
+ * 自愈监视器的置位条件：引擎进入了**系统提示处理**阶段。
+ *
+ * 这是「提示词真正挂上过」的唯一证据 —— 监视协程看到它就把 `promptDispatched`
+ * 置 true，之后的那个 ModelReady 才有资格被认领（见 [shouldClaimInFlight]）。
+ */
+internal fun isPromptDispatching(engineState: InferenceEngine.State): Boolean =
+    engineState is InferenceEngine.State.ProcessingSystemPrompt
+
+/**
+ * 自愈监视器的判定：这个引擎状态下，该不该替被取消的调用方认领在途提示词。
+ *
+ * 场景（2026-10-10 模拟器实测）：调用方在 `llm.init` 还阻塞在 JNI 时被取消
+ * （对话页按返回，承载 [SparkSession.ensureReady] 的协程一起没），
+ * 底层不受取消影响照常跑完，但 `loadedKey` 的赋值语句随协程消失 ——
+ * 引擎 ModelReady、key 却恒为 null，[sessionStateOf] 长期停在 Loading，
+ * 设置页永远显示「正在加载模型」，实际模型此刻完全可用。
+ *
+ * 三条缺一不可：
+ *  - `promptDispatched`：**必须先看过 `ProcessingSystemPrompt`**。ModelReady 有两种来路：
+ *    a) `loadModel` 刚完成、`setSystemPrompt` 还没开始 —— 提示词没挂上，认领等于谎报就绪；
+ *    b) 系统提示处理完 —— 可以认领。
+ *    所以**不许**只凭「状态是 ModelReady 且 key 为空」就认领，这个标志就是来路的证据。
+ *  - `hasInFlight`：确实有一条在途提示词，没有就无从认领。
+ *  - `!hasKey`：key 还空着 —— 已有值说明属主或下一次 [SparkSession.ensureReady] 已经记过，
+ *    不重复认领。
+ *
+ * 中途进过 [InferenceEngine.State.Error] 也一样：Error 不是 ModelReady，不认领。
+ *
+ * 纯函数：监视协程只做副作用，判定全在这里，单测直接钉。
+ */
+internal fun shouldClaimInFlight(
+    engineState: InferenceEngine.State,
+    promptDispatched: Boolean,
+    hasInFlight: Boolean,
+    hasKey: Boolean,
+): Boolean = engineState is InferenceEngine.State.ModelReady &&
+    promptDispatched && hasInFlight && !hasKey
 
 /**
  * 端侧模型的**唯一属主**：找模型、加载、系统提示、生成、卸载。
@@ -160,8 +204,45 @@ class SparkSession @Inject constructor(
      * 底层会继续把提示词处理完并进入 ModelReady——不记下来的话，下一次 ensureReady 会以为
      * 没加载过、又去 loadModel，撞上状态机的 `check(Initialized)` 直接抛，于是**永远失败**。
      * 首轮批量评估就是这么把 35 条全打成规则兜底的。
+     *
+     * 自愈监视器（另一个协程）也读它，所以 @Volatile。
      */
+    @Volatile
     private var inFlightPrompt: String? = null
+
+    /**
+     * 是否已观察到引擎进入 `ProcessingSystemPrompt` —— 即**本轮提示词真正挂上过**。
+     *
+     * 每轮 [ensureReady] 发起 init 前置 false；看过 `ProcessingSystemPrompt` 置 true；
+     * 自愈认领后复位 false。它是 [shouldClaimInFlight] 里区分「loadModel 刚完、提示词还没开始」
+     * 与「提示词处理完了」两种 ModelReady 的唯一证据。自愈监视器会跨协程写它，所以 @Volatile。
+     */
+    @Volatile
+    private var promptDispatched = false
+
+    /**
+     * 自愈监视器的作用域：进程级，与本 @Singleton 同寿，不随任何调用方的导航/超时取消。
+     *
+     * 刻意用裸 `SupervisorJob + Dispatchers.Default`，不引 Hilt 的 ApplicationScope ——
+     * 这是属主自己的内部机制，不欠任何注入图的债。
+     */
+    private val monitorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    init {
+        monitorScope.launch {
+            engine.state.collect { s ->
+                if (isPromptDispatching(s)) promptDispatched = true
+                val prompt = inFlightPrompt
+                if (prompt != null &&
+                    shouldClaimInFlight(s, promptDispatched, hasInFlight = true, hasKey = loadedKey != null)
+                ) {
+                    loadedKey = prompt
+                    promptDispatched = false
+                    Log.i(TAG, "调用方已取消，属主自行认领提示词（engine=$s）")
+                }
+            }
+        }
+    }
 
     /** 应用默认科目表的支出/收入分类名：进系统提示，也是解析时的白名单。 */
     val expenseCategories: List<String> by lazy { loadAccounts("expense") }
@@ -230,6 +311,9 @@ class SparkSession @Inject constructor(
                     runCatching { llm.free() }
                 }
                 inFlightPrompt = prompt
+                // 本轮从头来过：先撤销上一轮的「提示词挂上过」证据，
+                // 等真观察到 ProcessingSystemPrompt 再立起来（防止旧证据让监视器误认领）
+                promptDispatched = false
                 llm.init(file.absolutePath, prompt)
                 loadedKey = prompt
                 ReadyResult.Ready
