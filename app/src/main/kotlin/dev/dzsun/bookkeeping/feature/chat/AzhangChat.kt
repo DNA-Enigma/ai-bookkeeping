@@ -75,7 +75,8 @@ sealed interface AzhangTurn {
  *     这里只在模型回「查账」时把它透出去，不让模型算数。
  *  2. **模型不可用必须能降级**：一律返回 [AzhangTurn.Unavailable]，
  *     界面退回原来的规则判断与话术，聊天页不至于哑掉。
- *  3. **超时要短**：聊天是即时场景，等 90 秒等于不可用。
+ *  3. **超时预算不在这里定**：初始化与生成的预算统一在 [SparkSession.INIT_BUDGET_MS] /
+ *     [SparkSession.GEN_BUDGET_MS]，面板、对话页、问账页三处共用同一份。
  *  4. **非 JSON 输出先纠错再降级**：补救提示重试 1 次 → 仍是纯文本就按原话展示
  *     （数字护栏拦下的除外），见 [repairChatOutput]。用户聊天宁可看到模型原话，
  *     也不要看到「这次没答上」。
@@ -102,6 +103,12 @@ class AzhangChat @Inject constructor(
      */
     suspend fun warmUp(): ReadyResult = session.ensureReady()
 
+    /**
+     * 模型此刻是否已就绪。界面用它把「还在加载」和「真出不来」分开说 ——
+     * 超时的时候如果它还是 false，说明卡在初始化（首次要 1~2 分钟），不是生成失败。
+     */
+    val isReady: Boolean get() = session.isReady
+
     suspend fun turn(
         text: String,
         initTimeoutMs: Long = INIT_TIMEOUT_MS,
@@ -111,7 +118,8 @@ class AzhangChat @Inject constructor(
 
         val ready = withTimeoutOrNull(initTimeoutMs) { session.ensureReady() }
         val notReadyReason = when (ready) {
-            null -> "模型准备超时（${initTimeoutMs}ms），先按本地规则回答"
+            // 说清「还在加载」而不是「失败」：首次冷启动系统提示解码实测 97~100s
+            null -> "模型还在准备就没等到（首次约 1~2 分钟，上限 ${initTimeoutMs / 1000} 秒），先按本地规则回答"
             is ReadyResult.Failed -> issueMessage(ready.issue)
             is ReadyResult.Ready -> null
         }
@@ -135,7 +143,7 @@ class AzhangChat @Inject constructor(
             val reason = when {
                 genError != null ->
                     "生成失败：${genError!!.message ?: genError!!.javaClass.simpleName}"
-                out == null -> "生成超时（${genTimeoutMs}ms）"
+                out == null -> "生成超时（超过 ${genTimeoutMs / 1000} 秒没出结果）"
                 else -> "模型这次没有输出任何内容"
             }
             Log.i(TAG, "$reason，聊天走降级")
@@ -264,11 +272,14 @@ class AzhangChat @Inject constructor(
     companion object {
         private const val TAG = "AzhangChat"
 
-        /** 首次加载（含解码系统提示）的上限；模拟器实测 65s，真机应远快于此。 */
-        const val INIT_TIMEOUT_MS = 180_000L
+        /**
+         * 首次加载（含解码系统提示）的上限 —— **只引用，不定义**。
+         * 预算的唯一定义处在 [SparkSession.INIT_BUDGET_MS]，三处入口共用一份。
+         */
+        const val INIT_TIMEOUT_MS = SparkSession.INIT_BUDGET_MS
 
-        /** 单轮聊天生成上限：即时场景，宁可降级也不让用户干等。 */
-        const val GEN_TIMEOUT_MS = 45_000L
+        /** 单轮聊天生成上限 —— 同上，唯一定义处在 [SparkSession.GEN_BUDGET_MS]。 */
+        const val GEN_TIMEOUT_MS = SparkSession.GEN_BUDGET_MS
 
         /** 模型用这两个字表示「这个问题得查账本」。 */
         const val QUERY_KEYWORD = "查账"

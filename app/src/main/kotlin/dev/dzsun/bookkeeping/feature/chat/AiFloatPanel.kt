@@ -39,6 +39,7 @@ import dagger.hilt.android.EntryPointAccessors
 import dev.dzsun.bookkeeping.core.designsystem.Art
 import dev.dzsun.bookkeeping.core.designsystem.SealBadge
 import dev.dzsun.bookkeeping.feature.entry.AddEntryViewModel
+import dev.dzsun.bookkeeping.llm.SparkSession
 import java.time.LocalDate
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -95,7 +96,7 @@ fun AiFloatPanel(
         status = PanelStatus.PREPARING
         scope.launch {
             var finish: AzhangTurn? = null
-            val ok = withTimeoutOrNull(STREAM_BUDGET_MS) {
+            val ok = withTimeoutOrNull(PANEL_TURN_BUDGET_MS) {
                 azhang.streamTurn(text).collect { ev ->
                     when (ev) {
                         is AzhangStream.Preparing -> status = PanelStatus.PREPARING
@@ -116,7 +117,8 @@ fun AiFloatPanel(
                 // 超时：把已经吐出来的部分留着，别整段吞掉
                 !ok -> {
                     status = if (reply.isNotEmpty()) PanelStatus.DONE else PanelStatus.FAILED
-                    if (reply.isEmpty()) reply = TIMEOUT_TEXT
+                    // 超时要分清「还在加载」和「真出不来」——首次冷启动解码就要 100s 上下
+                    if (reply.isEmpty()) reply = if (azhang.isReady) TIMEOUT_TEXT else PREPARING_TIMEOUT_TEXT
                 }
 
                 result is AzhangTurn.Entry -> {
@@ -172,7 +174,7 @@ fun AiFloatPanel(
                 )
                 Text(
                     when (status) {
-                        PanelStatus.PREPARING -> "正在准备本机模型…"
+                        PanelStatus.PREPARING -> "模型准备中（首次约 1~2 分钟）…"
                         PanelStatus.STREAMING -> "回答生成中"
                         PanelStatus.DONE -> if (entry != null) "识别到账目，确认后可入账" else "本机模型 · 离线可用"
                         PanelStatus.FAILED -> "这次没答上"
@@ -380,9 +382,26 @@ private const val QUERY_GUIDE =
 private const val FAILED_TEXT =
     "这次没答上来。\n可以点「重试」再发一次，或点下面的入口去对话页。"
 
-/** 整轮超过预算、且一个字都没吐出来时的原因文案。 */
-private const val TIMEOUT_TEXT =
-    "这次生成超时了（超过 90 秒没出结果）。\n可以点「重试」再发一次，或点下面的入口去对话页。"
+/**
+ * 整轮超过预算、且一个字都没吐出来时的原因文案（秒数取自统一预算）。
+ * 这是**已经加载完、纯生成**超时的口径。
+ */
+internal val TIMEOUT_TEXT =
+    "这次生成超时了（超过 ${SparkSession.GEN_BUDGET_MS / 1000} 秒没出结果）。\n" +
+        "可以点「重试」再发一次，或点下面的入口去对话页。"
 
-/** 面板是即时场景：首次含模型加载的整体预算。 */
-private const val STREAM_BUDGET_MS = 90_000L
+/**
+ * 同样是超时，但模型**还在初始化**（首次冷启动系统提示解码实测 97~100s）——
+ * 必须和上面那句分开：这不是「答不上来」，是「还在准备」。
+ */
+internal const val PREPARING_TIMEOUT_TEXT =
+    "模型还在准备（首次约 1~2 分钟），这次没等到它就绪。\n" +
+        "可以点「重试」再发一次，或点下面的入口去对话页。"
+
+/**
+ * 面板一整条链（初始化 + 生成）的总预算。
+ * 两个分段预算的唯一定义处在 [SparkSession.INIT_BUDGET_MS] / [SparkSession.GEN_BUDGET_MS]，
+ * 这里只做相加 —— 不许再出现第四个写死的数字。
+ */
+internal const val PANEL_TURN_BUDGET_MS =
+    SparkSession.INIT_BUDGET_MS + SparkSession.GEN_BUDGET_MS

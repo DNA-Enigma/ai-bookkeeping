@@ -241,6 +241,24 @@ class SparkSession @Inject constructor(
 
         const val DEFAULT_MAX_TOKENS = 192
 
+        /**
+         * **初始化预算的唯一定义处**：加载模型 + 解码系统提示。
+         *
+         * 240s 来自实测 —— 模拟器上冷启动的系统提示解码 97~149s（见软测 TC-21/TC-03），
+         * 取它再留余量。面板、对话页、问账页一律引用这个常量，
+         * 不许再各写各的（此前 90s / 45s / 20s 三套预算互相打架，实测必超）。
+         * 与 `SparkAiParser.INIT_TIMEOUT_MS` 同值，由单测钉住。
+         */
+        const val INIT_BUDGET_MS = 240_000L
+
+        /**
+         * **单轮生成预算的唯一定义处**。
+         *
+         * 实测单轮生成 16~46s（批测平均 37.7s），90s 覆盖最慢的一倍有余。
+         * 同样是三个入口共用，别再写死 45_000 / 20_000。
+         */
+        const val GEN_BUDGET_MS = 90_000L
+
         /** 记账解析模式的用户消息前缀。 */
         const val MODE_PARSE = "【记账解析】\n"
 

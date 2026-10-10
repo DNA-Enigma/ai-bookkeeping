@@ -117,6 +117,13 @@ fun ChatScreen(
     var typing by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
 
+    /**
+     * 模型还在初始化（首次冷启动系统提示解码实测 97~100s）。
+     * 头部状态行据此说「还在准备」，而不是让用户对着打字气泡干等、
+     * 最后只得到一句失败。
+     */
+    var preparing by remember { mutableStateOf(false) }
+
     // 本地模型单例（EntryPoint 取，不能自己 new —— 会绕过单例导致重复加载模型）。
     // LocalContext 必须在 remember **外面**读：lambda 不是 @Composable 作用域。
     val appContext = LocalContext.current
@@ -231,7 +238,9 @@ fun ChatScreen(
         // 模型不可用时退回原来的规则判断与话术，聊天页不能哑掉。
         scope.launch {
             typing = true; scroll()
+            preparing = !azhang.isReady
             val turn = azhang.turn(text)
+            preparing = false
             typing = false
             when (turn) {
                 is AzhangTurn.Entry -> {
@@ -300,7 +309,11 @@ fun ChatScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(p.pos))
                     Spacer(Modifier.width(6.dp))
-                    Text("贴心管家 · 在线", style = TextStyle(fontSize = 11.sp, letterSpacing = 1.sp), color = p.ink3)
+                    Text(
+                        if (preparing) "模型准备中（首次约 1~2 分钟）" else "贴心管家 · 在线",
+                        style = TextStyle(fontSize = 11.sp, letterSpacing = 1.sp),
+                        color = if (preparing) p.accent else p.ink3,
+                    )
                 }
             }
             Spacer(Modifier.weight(1f))

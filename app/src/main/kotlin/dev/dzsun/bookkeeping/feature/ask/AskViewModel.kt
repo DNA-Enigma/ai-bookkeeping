@@ -11,6 +11,7 @@ import dev.dzsun.bookkeeping.core.network.LedgerQueryOutcome
 import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.core.platform.Clock
 import dev.dzsun.bookkeeping.feature.chat.AzhangChat
+import dev.dzsun.bookkeeping.llm.SparkSession
 import dev.dzsun.bookkeeping.feature.chat.AzhangTurn
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -171,8 +172,13 @@ class AskViewModel @Inject constructor(
     private companion object {
         const val LOCAL_NOTE = "这句话是按本地规则理解的，没有经过 AI 服务"
         const val MODEL_NOTE = "这句由本机模型回答，没有查账本"
-
-        /** 问账是即时场景：宁可答不了，也不让用户盯着转圈。 */
-        const val MODEL_GEN_TIMEOUT_MS = 20_000L
     }
 }
+
+/**
+ * 问账页让本机模型接话时的生成预算 —— **只引用，不定义**。
+ *
+ * 唯一定义处在 [SparkSession.GEN_BUDGET_MS]（90s）。这里原先写死 20s，
+ * 比实测单轮生成中位数还短，于是英文追问之类走模型的问账必超时。
+ */
+internal const val MODEL_GEN_TIMEOUT_MS: Long = SparkSession.GEN_BUDGET_MS
