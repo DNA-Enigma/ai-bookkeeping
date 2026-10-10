@@ -61,12 +61,15 @@ sealed interface AzhangTurn {
  * 靠用户消息前缀 [SparkSession.MODE_CHAT] 区分模式 —— 换提示词要重新加载模型，
  * 模拟器实测 65 秒，聊天里绝对不能发生。
  *
- * 三条口径：
+ * 四条口径：
  *  1. **查账不交给模型**：输入明显是「花了多少 / 哪类最多」时上层走 SQL 链路，
  *     这里只在模型回「查账」时把它透出去，不让模型算数。
  *  2. **模型不可用必须能降级**：一律返回 [AzhangTurn.Unavailable]，
  *     界面退回原来的规则判断与话术，聊天页不至于哑掉。
  *  3. **超时要短**：聊天是即时场景，等 90 秒等于不可用。
+ *  4. **非 JSON 输出先纠错再降级**：补救提示重试 1 次 → 仍是纯文本就按原话展示
+ *     （数字护栏拦下的除外），见 [repairChatOutput]。用户聊天宁可看到模型原话，
+ *     也不要看到「这次没答上」。
  */
 @Singleton
 class AzhangChat @Inject constructor(
@@ -121,7 +124,7 @@ class AzhangChat @Inject constructor(
             Log.i(TAG, "$reason，聊天走降级")
             return AzhangTurn.Unavailable(reason)
         }
-        return interpret(out)
+        return interpretRepaired(text, out, genTimeoutMs)
     }
 
     /**
@@ -175,28 +178,48 @@ class AzhangChat @Inject constructor(
             )
             return@flow
         }
-        emit(AzhangStream.Finish(interpret(raw.toString())))
+        emit(AzhangStream.Finish(interpretRepaired(text, raw.toString(), GEN_TIMEOUT_MS)))
     }
 
-    /** 把模型输出翻成一轮回复：数组 = 记账，`{"reply":...}` = 说话，其它 = 降级。 */
-    private fun interpret(out: String): AzhangTurn {
+    /**
+     * 解析一轮对话输出：数组 = 记账，`{"reply":...}` = 说话，**解读不了返回 null**——
+     * null 交给 [repairChatOutput] 补救重试，不再直接降级（1.7B 模型会吐
+     * 「（暂无具体对话内容）」这种非 JSON 的原话，见 [repairChatOutput]）。
+     */
+    private fun interpret(out: String): AzhangTurn? {
         // 1) 用户其实在报账 → 模型直接给了数组
         val entries = runCatching { parser.decodeEntries(out) }.getOrNull()
         if (!entries.isNullOrEmpty()) return AzhangTurn.Entry(entries)
 
         // 2) 正常对话
-        val reply = extractReply(out)
-        if (reply != null) {
-            val trimmed = reply.trim()
-            return AzhangTurn.Reply(
-                body = if (trimmed == QUERY_KEYWORD) QUERY_FALLBACK_TEXT else trimmed,
-                isLedgerQuery = trimmed == QUERY_KEYWORD,
-            )
-        }
-        Log.w(TAG, "无法解析模型输出: ${out.take(200)}")
-        // 原文只露前 80 字 —— 够定位问题，又不至于把一整段乱码糊在界面上
-        return AzhangTurn.Unavailable("模型输出不是合法 JSON：${out.trim().take(80)}")
+        return extractReply(out)?.trim()?.let { chatReply(it) }
     }
+
+    /**
+     * 解析 + **输出纠错**：解读不了就用补救提示重发一次（只重试 1 次），
+     * 仍失败且模型吐的是一句纯文本时按 [AzhangTurn.Reply] 展示，
+     * 被数字护栏拦下的除外（原因原样透给界面，不许只写日志）。
+     *
+     * 只服务 [SparkSession.MODE_CHAT]。记账解析（[SparkSession.MODE_PARSE]）
+     * 不经过这里，照旧回落 `LocalAiParser`。
+     */
+    private suspend fun interpretRepaired(
+        text: String,
+        out: String,
+        remedyTimeoutMs: Long,
+    ): AzhangTurn = repairChatOutput(
+        text = text,
+        firstOut = out,
+        parse = { interpret(it) },
+        remedy = {
+            withTimeoutOrNull(remedyTimeoutMs) {
+                session.complete(remedyPrompt(text), REMEDY_MAX_TOKENS)
+            }
+        },
+        log = { level, message ->
+            if (level == LogLevel.W) Log.w(TAG, message) else Log.i(TAG, message)
+        },
+    )
 
     private fun extractReply(out: String): String? {
         val s = out.indexOf('{')
@@ -228,4 +251,114 @@ class AzhangChat @Inject constructor(
         const val QUERY_FALLBACK_TEXT =
             "这个得看你的真实账本，我不编数字。\n试着问：「这个月餐饮花了多少」「哪类花得最多」。"
     }
+}
+
+// ============================================================================
+// 对话输出的纠错：以下都是纯函数，不碰引擎、不读 Android —— 单测直接钉这些。
+// ============================================================================
+
+/** 纠错过程的日志级别：生产接 `android.util.Log`，单测接采集器（日志要能被断言）。 */
+enum class LogLevel { W, I }
+
+/** 补救重试的次数上限：**只重试 1 次**，聊天是即时场景，不能让用户等第二轮。 */
+const val MAX_REMEDY_ATTEMPTS = 1
+
+/** 补救重试的 token 上限：只求一句合法 JSON，别让它再写长篇。 */
+const val REMEDY_MAX_TOKENS = 96
+
+/** 纯文本兜底的长度上限：超过就当复述/碎碎念，不上屏（1.7B 模型有这毛病）。 */
+const val MAX_PLAIN_REPLY_CHARS = 160
+
+/** 金额与百分比的形态 —— 数字护栏的判据（见 [displayablePlainText]）。 */
+private val NUMBER_GUARD = Regex("¥|￥|元|%|\\d+\\.\\d{2}")
+
+/**
+ * 解析失败时重发的**补救提示**：把原话再讲一遍，后面压一句更硬的输出约束。
+ * 比系统提示里的措辞更狠，是因为 1.7B 模型第一次没守格式，第二次要单点施压。
+ */
+fun remedyPrompt(text: String): String =
+    SparkSession.MODE_CHAT + text + "\n只输出 JSON，不要任何其他文字。"
+
+/**
+ * 重试后仍不是 JSON 时，模型吐的这句纯文本能不能直接当回复展示。
+ *
+ * 用户聊天宁可看到模型的原话，也不要看到「这次没答上」——但三类输出必须拦下：
+ *  1. **金额/百分比形态**（`¥38`、`28元`、`44%`、`3.50`）：编出来的数字比「没答上」伤得多，
+ *     查账那条链路本来走本地 SQL；
+ *  2. **JSON 残片**（含 `{}[]`）：半截代码不是一句话，展示出去等于把乱码糊用户脸上；
+ *  3. **超长输出**（> [MAX_PLAIN_REPLY_CHARS]）：模型复述系统提示、自言自语的整段碎碎念。
+ *
+ * 返回可直接展示的正文；不可展示返回 null，调用方如实报 [AzhangTurn.Unavailable]。
+ */
+fun displayablePlainText(out: String): String? {
+    val s = out.trim()
+    if (s.isEmpty() || s.length > MAX_PLAIN_REPLY_CHARS) return null
+    if (s.any { it == '{' || it == '}' || it == '[' || it == ']' }) return null
+    if (NUMBER_GUARD.containsMatchIn(s)) return null
+    return s
+}
+
+/** 一句正文 → 一轮回复；「查账」仍由上层走 SQL，不让模型算数。 */
+private fun chatReply(trimmed: String): AzhangTurn.Reply = AzhangTurn.Reply(
+    body = if (trimmed == AzhangChat.QUERY_KEYWORD) AzhangChat.QUERY_FALLBACK_TEXT else trimmed,
+    isLedgerQuery = trimmed == AzhangChat.QUERY_KEYWORD,
+)
+
+/**
+ * 对话输出的解析与纠错：[parse] 解读不了就用 [remedy] 补救重试，
+ * 次数上限 [maxRemedyAttempts]（默认 [MAX_REMEDY_ATTEMPTS] = 1）；
+ * 仍失败且模型吐的是**一句纯文本**时按 [AzhangTurn.Reply] 展示，
+ * 被 [displayablePlainText] 的护栏拦下时才降级 ——
+ * 降级必须带上原因（含重试了几次），**不许只写日志**。
+ *
+ * 解析、生成、日志全部注入，所以单测不需要 Android 与引擎。
+ * 只服务 [SparkSession.MODE_CHAT]；记账解析（[SparkSession.MODE_PARSE]）
+ * 不经过这里，照旧回落本地规则。
+ */
+suspend fun repairChatOutput(
+    text: String,
+    firstOut: String,
+    parse: (String) -> AzhangTurn?,
+    remedy: suspend (attempt: Int) -> String?,
+    maxRemedyAttempts: Int = MAX_REMEDY_ATTEMPTS,
+    log: (LogLevel, String) -> Unit = { _, _ -> },
+): AzhangTurn {
+    parse(firstOut)?.let { return it }
+
+    var latest = firstOut
+    var attempt = 0
+    while (attempt < maxRemedyAttempts) {
+        attempt++
+        log(LogLevel.W, "对话输出不是 JSON，补救重试 $attempt/$maxRemedyAttempts：${latest.trim().take(80)}")
+        val retried = try {
+            remedy(attempt)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            log(LogLevel.W, "补救重试 $attempt 生成失败：${e.message ?: e.javaClass.simpleName}")
+            null
+        }
+        if (!retried.isNullOrBlank()) {
+            val parsed = parse(retried)
+            if (parsed != null) {
+                log(LogLevel.I, "补救重试 $attempt 成功，重发后拿到合法输出")
+                return parsed
+            }
+            latest = retried
+        }
+    }
+
+    // 仍不是 JSON：对话模式宁可给用户看模型的原话，也不给一句「没答上」。
+    // 只看 [latest]（重试拿到的就用重试的）——首轮那句已被模型自己推翻，拿来补位是误导。
+    val plain = displayablePlainText(latest)
+    if (plain != null) {
+        log(LogLevel.I, "补救后仍非 JSON，按纯文本回复展示：${plain.take(80)}")
+        return chatReply(plain)
+    }
+
+    val retried = if (attempt > 0) "（已补救重试 $attempt 次）" else ""
+    // 原文只露前 80 字 —— 够定位问题，又不至于把一整段乱码糊在界面上
+    val reason = "模型输出不是合法 JSON$retried：${latest.trim().take(80)}"
+    log(LogLevel.I, "补救后仍不可解析，走降级：$reason")
+    return AzhangTurn.Unavailable(reason)
 }

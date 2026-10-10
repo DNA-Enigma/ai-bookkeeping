@@ -236,11 +236,16 @@ class SparkSession @Inject constructor(
         append("     支出：").append(expense.joinToString("、")).append("\n")
         append("     收入：").append(income.joinToString("、")).append("\n")
         append("   多笔合并拆成多个元素；中文数字转阿拉伯（五十块→50）；单位统一元。\n\n")
-        append("B. 输入以【对话】开头：分两种情况\n")
-        append("   - 用户其实在报一笔账 → 同样输出 A 的 JSON 数组（上层会弹出记账卡片）\n")
+        append("B. 输入以【对话】开头：\n")
+        append("   - 只输出 JSON，不要 JSON 之外的任何文字、解释或 markdown。\n")
+        append("   - 用户其实在报一笔账 → 输出 A 的 JSON 数组（上层会弹出记账卡片）\n")
         append("   - 否则输出 {\"reply\":\"你的回答\"}，60 字以内，**不编造具体金额、比例和统计数字**；\n")
         append("     用户在问「花了多少」「哪类最多」这类要查账的问题，reply 一律只写「查账」\n")
         append("     （上层会去查本地账本，不会让你算数）。\n")
+        append("   - 输入是问候、闲聊、英文、或你看不懂的内容，**也必须**输出 {\"reply\":\"...\"}，\n")
+        append("     用一句自然的中文回应（打个招呼，或请对方说清楚想记什么）。\n")
+        append("   - **绝不输出**括号说明、道歉或占位文本（例如「（暂无具体对话内容）」「无法回答」）。\n")
+        append("     说不出口的话就写进 reply 里，不要写在 JSON 外面。\n")
     }
 
     companion object {
