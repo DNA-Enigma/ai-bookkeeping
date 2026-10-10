@@ -237,7 +237,15 @@ fun ChatScreen(
 
                 is AzhangTurn.Reply -> messages += ChatMsg.Text(true, turn.body)
 
-                AzhangTurn.Unavailable -> legacyReply(text, intent)
+                is AzhangTurn.Unavailable -> {
+                    // 降级回答照旧给（规则识别/寒暄话术），但**原因也要摆出来**——
+                    // reason 已经是「是什么 + 下一步」的中文，原样透出即可。
+                    legacyReply(text, intent)
+                    if (turn.reason.isNotBlank()) {
+                        messages += ChatMsg.Text(true, "本机模型这次没接上：${turn.reason}")
+                        scroll()
+                    }
+                }
             }
             scroll()
         }

@@ -1,7 +1,10 @@
 package dev.dzsun.bookkeeping.feature.chat
 
+import dev.dzsun.bookkeeping.llm.ModelIssue
+import dev.dzsun.bookkeeping.llm.ReadyResult
 import dev.dzsun.bookkeeping.llm.ReplyStreamFilter
 import dev.dzsun.bookkeeping.llm.SparkSession
+import dev.dzsun.bookkeeping.llm.issueMessage
 import dev.dzsun.bookkeeping.feature.entry.SparkAiParser
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -42,8 +45,13 @@ sealed interface AzhangTurn {
      */
     data class Reply(val body: String, val isLedgerQuery: Boolean = false) : AzhangTurn
 
-    /** 模型不可用（没模型 / 超时 / 输出不合法）→ 调用方退回原来的规则与问答链路。 */
-    data object Unavailable : AzhangTurn
+    /**
+     * 模型不可用（没模型 / 引擎状态卡死 / 超时 / 输出不合法）→ 调用方退回原来的规则与问答链路。
+     *
+     * [reason] 是**给用户看的**：说清是什么 + 下一步做什么（见 `issueMessage`），
+     * 界面要原样透出，不要再另编一句与真实原因不符的文案。
+     */
+    data class Unavailable(val reason: String = "") : AzhangTurn
 }
 
 /**
@@ -72,31 +80,46 @@ class AzhangChat @Inject constructor(
      * 预热：进 AI 页面就把模型加载好，别让用户第一条消息先等几十秒。
      * 失败也无所谓 —— 真正调用时还会再试一次，然后走降级。
      */
-    suspend fun warmUp(): Boolean = runCatching { session.ensureReady() }.getOrDefault(false)
+    suspend fun warmUp(): ReadyResult = session.ensureReady()
 
     suspend fun turn(
         text: String,
         initTimeoutMs: Long = INIT_TIMEOUT_MS,
         genTimeoutMs: Long = GEN_TIMEOUT_MS,
     ): AzhangTurn {
-        if (text.isBlank()) return AzhangTurn.Unavailable
+        if (text.isBlank()) return AzhangTurn.Unavailable("这句话是空的")
 
-        val ready = withTimeoutOrNull(initTimeoutMs) {
-            runCatching { session.ensureReady() }.getOrDefault(false)
-        } ?: false
-        if (!ready) {
-            Log.i(TAG, "模型未就绪，聊天走降级")
-            return AzhangTurn.Unavailable
+        val ready = withTimeoutOrNull(initTimeoutMs) { session.ensureReady() }
+        val notReadyReason = when (ready) {
+            null -> "模型准备超时（${initTimeoutMs}ms），先按本地规则回答"
+            is ReadyResult.Failed -> issueMessage(ready.issue)
+            is ReadyResult.Ready -> null
+        }
+        if (notReadyReason != null) {
+            Log.i(TAG, "模型未就绪，聊天走降级：$notReadyReason")
+            return AzhangTurn.Unavailable(notReadyReason)
         }
 
+        var genError: Throwable? = null
         val out = withTimeoutOrNull(genTimeoutMs) {
-            runCatching {
+            try {
                 session.complete(SparkSession.MODE_CHAT + text, SparkSession.DEFAULT_MAX_TOKENS)
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                genError = e
+                null
+            }
         }
         if (out.isNullOrBlank()) {
-            Log.i(TAG, "生成超时/失败(${genTimeoutMs}ms)，聊天走降级")
-            return AzhangTurn.Unavailable
+            val reason = when {
+                genError != null ->
+                    "生成失败：${genError!!.message ?: genError!!.javaClass.simpleName}"
+                out == null -> "生成超时（${genTimeoutMs}ms）"
+                else -> "模型这次没有输出任何内容"
+            }
+            Log.i(TAG, "$reason，聊天走降级")
+            return AzhangTurn.Unavailable(reason)
         }
         return interpret(out)
     }
@@ -113,14 +136,21 @@ class AzhangChat @Inject constructor(
      */
     fun streamTurn(text: String): Flow<AzhangStream> = flow {
         if (text.isBlank()) {
-            emit(AzhangStream.Finish(AzhangTurn.Unavailable))
+            emit(AzhangStream.Finish(AzhangTurn.Unavailable("这句话是空的")))
             return@flow
         }
         emit(AzhangStream.Preparing)
-        val ready = runCatching { session.ensureReady() }.getOrDefault(false)
-        if (!ready) {
-            Log.i(TAG, "模型未就绪，流式聊天走降级")
-            emit(AzhangStream.Finish(AzhangTurn.Unavailable))
+        val ready = try {
+            session.ensureReady()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            ReadyResult.Failed(ModelIssue.LoadFailed(e.message ?: e.javaClass.simpleName))
+        }
+        if (ready is ReadyResult.Failed) {
+            val reason = issueMessage(ready.issue)
+            Log.i(TAG, "模型未就绪，流式聊天走降级：$reason")
+            emit(AzhangStream.Finish(AzhangTurn.Unavailable(reason)))
             return@flow
         }
 
@@ -138,7 +168,11 @@ class AzhangChat @Inject constructor(
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "流式生成失败: ${e.message}")
-            emit(AzhangStream.Finish(AzhangTurn.Unavailable))
+            emit(
+                AzhangStream.Finish(
+                    AzhangTurn.Unavailable("生成失败：${e.message ?: e.javaClass.simpleName}"),
+                ),
+            )
             return@flow
         }
         emit(AzhangStream.Finish(interpret(raw.toString())))
@@ -160,7 +194,8 @@ class AzhangChat @Inject constructor(
             )
         }
         Log.w(TAG, "无法解析模型输出: ${out.take(200)}")
-        return AzhangTurn.Unavailable
+        // 原文只露前 80 字 —— 够定位问题，又不至于把一整段乱码糊在界面上
+        return AzhangTurn.Unavailable("模型输出不是合法 JSON：${out.trim().take(80)}")
     }
 
     private fun extractReply(out: String): String? {

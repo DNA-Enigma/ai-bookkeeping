@@ -1,6 +1,8 @@
 package dev.dzsun.bookkeeping.feature.entry
 
+import dev.dzsun.bookkeeping.llm.ReadyResult
 import dev.dzsun.bookkeeping.llm.SparkSession
+import dev.dzsun.bookkeeping.llm.issueMessage
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.withTimeoutOrNull
@@ -60,9 +62,8 @@ class SparkAiParser @Inject constructor(
         // 初始化（读模型 + 解码系统提示）单独给宽超时：系统提示里带分类表，
         // 模拟器实测要 60s+ 才解码完；用生成超时去卡它会把初始化掐死，
         // 引擎卡在 ProcessingSystemPrompt，之后每条都 1ms 快速失败、全落规则兜底。
-        val ready = withTimeoutOrNull(initTimeoutMs) {
-            runCatching { session.ensureReady() }.getOrDefault(false)
-        } ?: false
+        val readyResult = withTimeoutOrNull(initTimeoutMs) { session.ensureReady() }
+        val ready = readyResult is ReadyResult.Ready
         val initMs = System.currentTimeMillis() - t0
 
         val modelOut = if (ready) {
@@ -73,7 +74,15 @@ class SparkAiParser @Inject constructor(
             }
         } else null
         val elapsed = System.currentTimeMillis() - t0
-        if (!ready) Log.w(TAG, "初始化未就绪(超时上限 ${initTimeoutMs}ms, 实际 ${initMs}ms)")
+        if (!ready) {
+            // 原因进日志：用户侧照旧降级规则解析，但排查时不必再去猜是没模型还是状态卡死
+            val why = when (readyResult) {
+                null -> "调用方超时取消，没拿到就绪结论"
+                is ReadyResult.Failed -> issueMessage(readyResult.issue)
+                is ReadyResult.Ready -> "" // 上面已判过，走不到
+            }
+            Log.w(TAG, "初始化未就绪(超时上限 ${initTimeoutMs}ms, 实际 ${initMs}ms)：$why")
+        }
 
         if (modelOut.isNullOrBlank()) {
             Log.i(TAG, "模型不可用/超时(${elapsed}ms)，回落规则解析")

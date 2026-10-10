@@ -126,10 +126,18 @@ class AskViewModel @Inject constructor(
     private suspend fun askWithModel(question: String): AskStage {
         val turn = runCatching {
             azhang.turn(question, genTimeoutMs = MODEL_GEN_TIMEOUT_MS)
-        }.getOrDefault(AzhangTurn.Unavailable)
+        }.getOrElse {
+            AzhangTurn.Unavailable("对话失败：${it.message ?: it.javaClass.simpleName}")
+        }
 
         val reply = turn as? AzhangTurn.Reply
-            ?: return AskStage.Unavailable(question, UserFacingErrors.ASK)
+            ?: return AskStage.Unavailable(
+                question,
+                // Unavailable.reason 是本机写死的用户文案（含下一步动作），
+                // 与 UserFacingErrors 同属白名单，不是服务端原文，可以透传。
+                (turn as? AzhangTurn.Unavailable)?.reason?.takeIf { it.isNotBlank() }
+                    ?: UserFacingErrors.ASK,
+            )
         // 模型自己说「这得查账」，或者压根没答出来 → 如实答不了
         if (reply.isLedgerQuery || reply.body.isBlank()) {
             return AskStage.Unavailable(question, UserFacingErrors.ASK)

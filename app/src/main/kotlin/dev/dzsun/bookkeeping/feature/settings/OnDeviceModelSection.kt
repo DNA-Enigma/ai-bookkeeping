@@ -34,12 +34,13 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import com.arm.aichat.AiChat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.dzsun.bookkeeping.core.designsystem.Art
 import dev.dzsun.bookkeeping.llm.ModelInstaller
-import dev.dzsun.bookkeeping.llm.SparkLlm
+import dev.dzsun.bookkeeping.llm.ReadyResult
+import dev.dzsun.bookkeeping.llm.SparkSession
+import dev.dzsun.bookkeeping.llm.issueMessage
 import java.io.File
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -98,10 +99,9 @@ private class AssetModelAssets(private val context: Context) : dev.dzsun.bookkee
 @HiltViewModel
 class OnDeviceModelViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
+    /** 端侧模型的唯一属主：加载、生成、卸载都走它，这里不再自建引擎。 */
+    private val session: SparkSession,
 ) : ViewModel() {
-
-    private val engine by lazy { AiChat.getInferenceEngine(context) }
-    private val llm by lazy { SparkLlm(engine) }
 
     private val _state = MutableStateFlow<OnDeviceUiState>(OnDeviceUiState.Idle)
     val state: StateFlow<OnDeviceUiState> = _state.asStateFlow()
@@ -112,9 +112,6 @@ class OnDeviceModelViewModel @Inject constructor(
     /** 设备上当前能找到的模型文件；释放内置模型后刷新，UI 用它渲染状态行。 */
     private val _modelFile = MutableStateFlow(findModel())
     val modelFile: StateFlow<File?> = _modelFile.asStateFlow()
-
-    /** 已加载的模型路径；null = 未加载（生成前必须先加载） */
-    private var loadedPath: String? = null
 
     /** 找设备上的 GGUF：优先应用私有目录（免权限），再退回外部下载目录。 */
     fun findModel(): File? {
@@ -177,37 +174,50 @@ class OnDeviceModelViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 加载交给 [SparkSession]：它用**带科目表的系统提示**（全 App 唯一那一份），
+     * 这里若自建一份，两套提示词会来回重载模型（模拟器实测每次 60s+）。
+     *
+     * 「已加载」只在 `session.ensureReady()` 真的成功后才置 [OnDeviceUiState.Ready]。
+     */
     private fun loadFile(file: File) {
         viewModelScope.launch {
             _state.value = OnDeviceUiState.Loading(file.absolutePath)
-            try {
-                llm.init(file.absolutePath)
-                loadedPath = file.absolutePath
-                _state.value = OnDeviceUiState.Ready(file.absolutePath)
-                Log.i(TAG, "model loaded: ${file.absolutePath} (${file.length() / 1024 / 1024} MB)")
-            } catch (e: Throwable) {
-                loadedPath = null
-                _state.value = OnDeviceUiState.Failed("加载失败：${e.message ?: e.javaClass.simpleName}")
-                Log.e(TAG, "model load failed", e)
+            when (val result = session.ensureReady()) {
+                is ReadyResult.Ready -> {
+                    _state.value = OnDeviceUiState.Ready(file.absolutePath)
+                    Log.i(TAG, "model loaded: ${file.absolutePath} (${file.length() / 1024 / 1024} MB)")
+                }
+
+                is ReadyResult.Failed -> {
+                    val why = issueMessage(result.issue)
+                    _state.value = OnDeviceUiState.Failed(why)
+                    Log.e(TAG, "model load failed: $why")
+                }
             }
         }
     }
 
     fun generate(prompt: String) {
-        val path = loadedPath
-        if (path == null) {
-            _state.value = OnDeviceUiState.Failed("模型还没加载，先点「加载模型」")
-            return
-        }
         if (prompt.isBlank()) return
         viewModelScope.launch {
+            // 先按真实状态确认就绪：没就绪就说没就绪的原因，不显示与状态脱节的旧文案
+            val ready = session.ensureReady()
+            if (ready is ReadyResult.Failed) {
+                val why = issueMessage(ready.issue)
+                _state.value = OnDeviceUiState.Failed(why)
+                Log.w(TAG, "generate blocked: $why")
+                return@launch
+            }
+            val path = _modelFile.value?.absolutePath
+                ?: session.findModel()?.absolutePath.orEmpty()
             val t0 = SystemClock.elapsedRealtime()
             var firstTokenAt = 0L
             val sb = StringBuilder()
             var chunks = 0
             _state.value = OnDeviceUiState.Running(path, "")
             try {
-                llm.generate(prompt).collect { piece ->
+                session.llm.generate(prompt).collect { piece ->
                     if (firstTokenAt == 0L) firstTokenAt = SystemClock.elapsedRealtime()
                     sb.append(piece)
                     chunks++
@@ -234,17 +244,14 @@ class OnDeviceModelViewModel @Inject constructor(
     }
 
     fun unload() {
-        try {
-            llm.free()
-        } catch (e: Throwable) {
-            Log.w(TAG, "unload failed", e)
-        }
-        loadedPath = null
+        // 交给属主：session 会连同 loadedKey / inFlightPrompt 一起清掉，
+        // 这里自己 free 的话 session 还以为模型在，下一次 ensureReady 会直接给错状态。
+        session.unload()
         _state.value = OnDeviceUiState.Idle
     }
 
     companion object {
-        private const val TAG = "SparkLlm"
+        private const val TAG = "OnDeviceModel"
     }
 }
 

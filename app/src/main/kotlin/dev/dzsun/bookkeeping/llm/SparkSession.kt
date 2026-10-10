@@ -7,6 +7,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -14,6 +15,45 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
+
+/**
+ * [SparkSession.ensureReady] 的结果：要么就绪，要么带一条能落到界面上的原因。
+ *
+ * 用封闭类型而不是 Boolean，是因为「没就绪」在界面上必须说清楚**是什么、下一步做什么**——
+ * 布尔值会把原因丢在 logcat 里，用户看到的文案就只能靠猜。
+ */
+sealed interface ReadyResult {
+    data object Ready : ReadyResult
+    data class Failed(val issue: ModelIssue) : ReadyResult
+}
+
+/** 模型没就绪的原因。封闭成三类，调用方的 `when` 漏一类编译器就会拦。 */
+sealed interface ModelIssue {
+    /** 设备上找不到 GGUF 文件。 */
+    data object NoModelFile : ModelIssue
+
+    /** 加载模型或解码系统提示时抛了错（保留原始报错文本）。 */
+    data class LoadFailed(val message: String) : ModelIssue
+
+    /**
+     * 引擎状态机拒绝了本次调用（上一轮没卸干净、还在生成、超时残留）。
+     * [engineState] 是拒绝时刻的引擎状态名 —— 这是「状态卡死」的现场证据。
+     */
+    data class Interrupted(val engineState: String) : ModelIssue
+}
+
+/**
+ * 把 [ModelIssue] 翻成给用户看的中文：**先说清是什么，再说下一步做什么**。
+ *
+ * 纯函数：不碰引擎、不打日志、不读资源，所以能直接单测各分支。
+ */
+fun issueMessage(issue: ModelIssue): String = when (issue) {
+    ModelIssue.NoModelFile -> "未找到模型文件，去设置页点「加载模型」"
+    is ModelIssue.LoadFailed ->
+        "模型加载失败：${issue.message}。点「卸载」后重新加载，或重启应用再试"
+    is ModelIssue.Interrupted ->
+        "模型引擎状态异常（${issue.engineState}），点「卸载」后重新加载"
+}
 
 /**
  * 端侧模型的**唯一属主**：找模型、加载、系统提示、生成、卸载。
@@ -87,23 +127,25 @@ class SparkSession @Inject constructor(
     /**
      * 确保模型已加载。幂等：同一个系统提示只会真正加载一次。
      *
-     * @return false = 找不到模型或加载失败（调用方走降级路径，不要抛给用户）
+     * 失败**不抛**（协程取消除外）——一律折进 [ReadyResult.Failed]，原因分
+     * [ModelIssue.NoModelFile] / [ModelIssue.LoadFailed] / [ModelIssue.Interrupted] 三类，
+     * 调用方自己决定降级还是把 [issueMessage] 摆到界面上。
      */
-    suspend fun ensureReady(): Boolean {
+    suspend fun ensureReady(): ReadyResult {
         val prompt = systemPrompt
-        if (loadedKey == prompt) return true
+        if (loadedKey == prompt) return ReadyResult.Ready
         return mutex.withLock {
-            if (loadedKey == prompt) return@withLock true
+            if (loadedKey == prompt) return@withLock ReadyResult.Ready
 
             // 上次只是调用方先超时、JNI 后台其实跑完了 → 直接接上
             if (inFlightPrompt == prompt &&
                 engine.state.value is com.arm.aichat.InferenceEngine.State.ModelReady
             ) {
                 loadedKey = prompt
-                return@withLock true
+                return@withLock ReadyResult.Ready
             }
 
-            val file = findModel() ?: return@withLock false
+            val file = findModel() ?: return@withLock ReadyResult.Failed(ModelIssue.NoModelFile)
             try {
                 // 引擎是进程级单例，可能停在 Error/ModelReady 上；能复位就复位，
                 // 复位不了（比如 JNI 还在跑）就让它失败，下次靠上面那条接上。
@@ -113,12 +155,33 @@ class SparkSession @Inject constructor(
                 inFlightPrompt = prompt
                 llm.init(file.absolutePath, prompt)
                 loadedKey = prompt
-                true
+                ReadyResult.Ready
+            } catch (e: CancellationException) {
+                // 取消要照常抛出去，否则 withTimeoutOrNull 会以为这轮正常结束了
+                throw e
             } catch (e: Throwable) {
                 Log.w(TAG, "init 失败: ${e.message}", e)
                 loadedKey = null
-                false
+                ReadyResult.Failed(classifyInitFailure(e))
             }
+        }
+    }
+
+    /**
+     * 把引擎抛的异常归类。
+     *
+     * 引擎状态机的 `check` 拒绝（loadModel 要求 Initialized、cleanUp 只认
+     * ModelReady/Error、setSystemPrompt 要求紧跟 loadModel）算 [ModelIssue.Interrupted]，
+     * 并记下当前状态名；其余（文件缺失、架构不支持、准备资源失败、提示词解码失败）
+     * 算 [ModelIssue.LoadFailed]。
+     */
+    private fun classifyInitFailure(e: Throwable): ModelIssue {
+        val msg = e.message ?: e.javaClass.simpleName
+        val stateRejected = e is IllegalStateException && STATE_REJECTION_MARKERS.any { msg.contains(it) }
+        return if (stateRejected) {
+            ModelIssue.Interrupted(engine.state.value.javaClass.simpleName)
+        } else {
+            ModelIssue.LoadFailed(msg)
         }
     }
 
@@ -182,6 +245,18 @@ class SparkSession @Inject constructor(
 
     companion object {
         private const val TAG = "SparkSession"
+
+        /**
+         * 引擎状态机拒绝时抛出的消息片段 —— 对应 `InferenceEngineImpl` 里
+         * loadModel / cleanUp / setSystemPrompt 三处 `check`（上游原样引入，不可改）。
+         * 命中其中任一条就是「状态卡死」，而不是模型本身有问题。
+         */
+        private val STATE_REJECTION_MARKERS = listOf(
+            "Cannot load model in",
+            "Cannot unload model in",
+            "Cannot process system prompt in",
+            "System prompt must be set",
+        )
 
         const val DEFAULT_MAX_TOKENS = 192
 

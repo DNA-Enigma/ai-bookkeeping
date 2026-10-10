@@ -78,15 +78,16 @@ fun AiFloatPanel(
     var entry by remember { mutableStateOf<dev.dzsun.bookkeeping.feature.entry.ParsedEntry?>(null) }
     var saved by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    /** 上一次真正发出去的那句 —— 失败态的「重试」重发它，而不是让用户重新打一遍。 */
+    var lastText by remember { mutableStateOf("") }
 
     // 打开面板就预热模型：1GB 模型 + 系统提示解码要花时间，
     // 等用户打完字再开始加载，那条消息就白等了。
     LaunchedEffect(Unit) { azhang.warmUp() }
 
-    fun send() {
-        val text = input.trim()
+    fun startTurn(text: String) {
         if (text.isEmpty() || busy) return
-        input = ""
+        lastText = text
         busy = true
         saved = null
         entry = null
@@ -113,7 +114,10 @@ fun AiFloatPanel(
             val result = finish
             when {
                 // 超时：把已经吐出来的部分留着，别整段吞掉
-                !ok -> status = if (reply.isNotEmpty()) PanelStatus.DONE else PanelStatus.FAILED
+                !ok -> {
+                    status = if (reply.isNotEmpty()) PanelStatus.DONE else PanelStatus.FAILED
+                    if (reply.isEmpty()) reply = TIMEOUT_TEXT
+                }
 
                 result is AzhangTurn.Entry -> {
                     entry = result.entries.first()
@@ -127,12 +131,23 @@ fun AiFloatPanel(
                 }
 
                 else -> {
+                    // 失败必须显示**真实原因**（模型没就绪/超时/输出不是 JSON），
+                    // 不能再挂一句与现场无关的兜底话术；原因本身已带下一步动作。
                     status = PanelStatus.FAILED
-                    if (reply.isEmpty()) reply = FAILED_TEXT
+                    val reason = (result as? AzhangTurn.Unavailable)
+                        ?.reason?.takeIf { it.isNotBlank() } ?: FAILED_TEXT
+                    reply = if (reply.isEmpty()) reason else "$reply\n\n—— $reason"
                 }
             }
             busy = false
         }
+    }
+
+    fun send() {
+        val text = input.trim()
+        if (text.isEmpty() || busy) return
+        input = ""
+        startTurn(text)
     }
 
     Column(
@@ -324,9 +339,17 @@ fun AiFloatPanel(
 
         Spacer(Modifier.height(12.dp))
 
-        /* 去处：答不了的兜底入口 */
+        /* 去处：失败时把第一个 chip 换成「重试」（重发上一条），否则给两个兜底入口 */
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PanelChip("去问账页", Modifier.weight(1f), onClick = onAskClick)
+            if (status == PanelStatus.FAILED && lastText.isNotEmpty()) {
+                PanelChip(
+                    "重试",
+                    Modifier.weight(1f),
+                    onClick = { startTurn(lastText) },
+                )
+            } else {
+                PanelChip("去问账页", Modifier.weight(1f), onClick = onAskClick)
+            }
             PanelChip("去对话页", Modifier.weight(1f), onClick = onOpenChat)
         }
     }
@@ -351,8 +374,13 @@ private fun PanelChip(text: String, modifier: Modifier = Modifier, onClick: () -
 private const val QUERY_GUIDE =
     "这个得看你的真实账本，我不编数字。\n点下面「去问账页」问：「这个月餐饮花了多少」。"
 
+/** 兜底失败文案 —— 仅当连具体原因都没拿到（如 turn 为空）时才用，通常显示的是 Unavailable.reason。 */
 private const val FAILED_TEXT =
-    "这次没答上来（模型还没准备好或超时了）。\n可以点下面的入口，或者过一会儿再问一句。"
+    "这次没答上来。\n可以点「重试」再发一次，或点下面的入口去对话页。"
+
+/** 整轮超过预算、且一个字都没吐出来时的原因文案。 */
+private const val TIMEOUT_TEXT =
+    "这次生成超时了（超过 90 秒没出结果）。\n可以点「重试」再发一次，或点下面的入口去对话页。"
 
 /** 面板是即时场景：首次含模型加载的整体预算。 */
 private const val STREAM_BUDGET_MS = 90_000L

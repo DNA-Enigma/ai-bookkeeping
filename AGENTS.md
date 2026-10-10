@@ -46,6 +46,13 @@
    用户的每次修改必须作为 `edits[{field, from, to}]` 回报——
    那是自进化最有价值的输入，等于一条带真值的标注。
 
+6. **端侧模型只经 `SparkSession` 访问，禁止直接 `new SparkLlm` /
+   `AiChat.getInferenceEngine`**（SparkSession 内部除外）。（2026-10-10 追加）
+   引擎要求 `setSystemPrompt` 紧跟 loadModel 且只此一次，多一个属主就多一次重载
+   （模拟器实测解码系统提示 60s+），实测已出现「设置页加载完、进首页又被重载一遍」。
+   加载失败的原因由 `ensureReady(): ReadyResult` 透出，用户文案统一走纯函数
+   `issueMessage(issue)`；界面**直接显示它**，不要另编与真实原因不符的话术。
+
 ---
 
 ## 三、构建环境（踩过的坑，别再踩）
