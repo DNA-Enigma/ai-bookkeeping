@@ -14,8 +14,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonPrimitive
 import android.util.Log
 
 /** 流式一轮对话的过程事件。 */
@@ -88,8 +89,6 @@ class AzhangChat @Inject constructor(
     private val session: SparkSession,
     private val parser: SparkAiParser,
 ) {
-
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /**
      * 离线规则解析器 —— 只在**模型回了话却没给数组**时兜一次底（见 [withRulesEntryFallback]）。
@@ -207,17 +206,18 @@ class AzhangChat @Inject constructor(
     }
 
     /**
-     * 解析一轮对话输出：数组 = 记账，`{"reply":...}` = 说话，**解读不了返回 null**——
-     * null 交给 [repairChatOutput] 补救重试，不再直接降级（1.7B 模型会吐
-     * 「（暂无具体对话内容）」这种非 JSON 的原话，见 [repairChatOutput]）。
+     * 解析一轮对话输出：数组 = 记账，回复对象 = 说话（同义字段容错，见
+     * [displayableChatReply]），**解读不了返回 null**——null 交给 [repairChatOutput]
+     * 补救重试，不再直接降级（1.7B 模型会吐「（暂无具体对话内容）」这种非 JSON
+     * 的原话，见 [repairChatOutput]）。
      */
     private fun interpret(out: String): AzhangTurn? {
         // 1) 用户其实在报账 → 模型直接给了数组
         val entries = runCatching { parser.decodeEntries(out) }.getOrNull()
         if (!entries.isNullOrEmpty()) return AzhangTurn.Entry(entries)
 
-        // 2) 正常对话
-        return extractReply(out)?.trim()?.let { chatReply(it) }
+        // 2) 正常对话：同义字段容错 + 数字护栏（护栏不因为容错而放松）
+        return displayableChatReply(out)?.let { chatReply(it) }
     }
 
     /**
@@ -258,16 +258,6 @@ class AzhangChat @Inject constructor(
         } else {
             entry.categoryName in session.expenseCategories
         }
-
-    private fun extractReply(out: String): String? {
-        val s = out.indexOf('{')
-        val e = out.lastIndexOf('}')
-        if (s !in 0 until e) return null
-        val obj = runCatching {
-            json.parseToJsonElement(out.substring(s, e + 1))
-        }.getOrNull() as? JsonObject ?: return null
-        return obj["reply"]?.jsonPrimitive?.content
-    }
 
     companion object {
         private const val TAG = "AzhangChat"
@@ -344,6 +334,54 @@ fun displayablePlainText(out: String): String? {
     if (NUMBER_GUARD.containsMatchIn(s)) return null
     return s
 }
+
+/** 回复正文的同义字段，按优先级取**首个非空字符串**（软测 TC-22：补救重试吐 `{"content":…}` 缺 `reply`）。 */
+private val REPLY_KEYS = listOf("reply", "content", "text", "message")
+
+/** 外层包装键：顶层没有回复字段时往里看**一层**（data / result 各一层，不递归）。 */
+private val WRAPPER_KEYS = listOf("data", "result")
+
+/** 解析回复用的 JSON（宽松：允许前后有杂音，只要外层是对象）。 */
+private val replyJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+/**
+ * 从模型输出取一段**可展示**的回复正文：同义字段容错 + [displayablePlainText] 护栏。
+ *
+ * 容错（schema 漂移，TC-22 实测）：
+ *  1. 顶层对象按 reply → content → text → message 取首个非空字符串；
+ *  2. 都没有再进 data / result 各一层，里面按同样顺序找（**不递归**，一层到头）；
+ *  3. 非字符串（null、数字）与空白串都跳过，不当正文。
+ *
+ * **护栏不放松**：取出的正文照样过 [displayablePlainText] ——
+ * 金额/百分比形态、JSON 残片、超长一律拦下返回 null（交给补救重试）。
+ * 容错的是字段名，不是内容尺度。数组仍由 [AzhangChat.interpret] 的记账解析先接走，不经过这里。
+ */
+internal fun displayableChatReply(out: String): String? =
+    extractReply(out)?.let { displayablePlainText(it) }
+
+/** 见 [displayableChatReply] 的口径；返回**未经护栏**的原始正文，护栏由调用方套。 */
+private fun extractReply(out: String): String? {
+    val s = out.indexOf('{')
+    val e = out.lastIndexOf('}')
+    if (s !in 0 until e) return null
+    val obj = runCatching {
+        replyJson.parseToJsonElement(out.substring(s, e + 1))
+    }.getOrNull() as? JsonObject ?: return null
+    return firstReplyString(obj)
+        ?: WRAPPER_KEYS.firstNotNullOfOrNull { key ->
+            (obj[key] as? JsonObject)?.let { firstReplyString(it) }
+        }
+}
+
+/** 按 [REPLY_KEYS] 的顺序取首个非空字符串；`{"reply":null}` / `{"reply":"  "}` 都跳过。 */
+private fun firstReplyString(obj: JsonObject): String? =
+    REPLY_KEYS.firstNotNullOfOrNull { key ->
+        (obj[key] as? JsonPrimitive)
+            ?.takeIf { it !is JsonNull && it.isString }
+            ?.content
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+    }
 
 /** 一句正文 → 一轮回复；「查账」仍由上层走 SQL，不让模型算数。 */
 private fun chatReply(trimmed: String): AzhangTurn.Reply = AzhangTurn.Reply(
