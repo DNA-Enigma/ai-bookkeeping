@@ -7,8 +7,12 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.arm.aichat.InferenceEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -56,6 +60,62 @@ fun issueMessage(issue: ModelIssue): String = when (issue) {
 }
 
 /**
+ * 属主 [SparkSession] 对外的**权威状态**：全 App 订阅这一份，谁也不许自己再攒一份。
+ *
+ * 背景：设置页原先自持 `_state`，功能页把模型加载好了它还显示「未加载」，
+ * 面板自动重载后它又倒回去——两份状态必然漂移。状态的真源只有属主一个。
+ */
+sealed interface SessionState {
+    /** 没加载、也没在准备 —— 设置页该显示「未加载」。 */
+    data object Idle : SessionState
+
+    /** 加载中 / 解码系统提示中 / 卸载中（首次约 1~2 分钟）。 */
+    data object Loading : SessionState
+
+    /** 已就绪，可以生成。 */
+    data object Ready : SessionState
+
+    /** 正在生成。 */
+    data object Generating : SessionState
+
+    /** 引擎报错，[message] 是给用户看的原因。 */
+    data class Error(val message: String) : SessionState
+}
+
+/**
+ * 引擎状态 + 是否已加载提示词 → [SessionState]。纯函数，单测直接钉。
+ *
+ * 口径：
+ *  - **Error 优先**：引擎报错时无论加载与否，先把原因亮出来；
+ *  - 生成类状态（Generating / ProcessingUserPrompt）→ Generating；
+ *  - 准备类状态（加载/解码提示/卸载/基准测试）→ Loading；
+ *  - ModelReady 且提示词已加载 → Ready；ModelReady 但没加载（不可能长期出现）按 Loading；
+ *  - 其余（Uninitialized / Initialized）：没加载就是 Idle，
+ *    加载了却回到这里说明引擎被复位，按 Loading 算、等下一次 ensureReady 接上。
+ */
+internal fun sessionStateOf(engineState: InferenceEngine.State, loaded: Boolean): SessionState =
+    when (engineState) {
+        is InferenceEngine.State.Error -> SessionState.Error(
+            engineState.exception.message ?: engineState.exception.javaClass.simpleName,
+        )
+
+        InferenceEngine.State.Generating,
+        InferenceEngine.State.ProcessingUserPrompt,
+        -> SessionState.Generating
+
+        InferenceEngine.State.Initializing,
+        InferenceEngine.State.LoadingModel,
+        InferenceEngine.State.UnloadingModel,
+        InferenceEngine.State.ProcessingSystemPrompt,
+        InferenceEngine.State.Benchmarking,
+        -> SessionState.Loading
+
+        InferenceEngine.State.ModelReady -> if (loaded) SessionState.Ready else SessionState.Loading
+
+        else -> if (loaded) SessionState.Loading else SessionState.Idle
+    }
+
+/**
  * 端侧模型的**唯一属主**：找模型、加载、系统提示、生成、卸载。
  *
  * ## 为什么全 App 只能有一个系统提示
@@ -85,8 +145,13 @@ class SparkSession @Inject constructor(
     private val mutex = Mutex()
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    /** 已加载的系统提示；null = 未加载。 */
-    private var loadedKey: String? = null
+    /** 已加载的系统提示；null = 未加载。写它即等于对外广播「加载好了 / 卸掉了」。 */
+    private val _loadedKey = MutableStateFlow<String?>(null)
+    private var loadedKey: String?
+        get() = _loadedKey.value
+        set(value) {
+            _loadedKey.value = value
+        }
 
     /**
      * 最近一次发起过 init 的提示词。
@@ -108,6 +173,18 @@ class SparkSession @Inject constructor(
     val isReady: Boolean get() = loadedKey != null
 
     val state get() = engine.state
+
+    /**
+     * 属主的权威状态流 —— **设置页等消费方只订阅它，不许自持一份状态**。
+     *
+     * 由引擎状态机与 `loadedKey` 合成（不重建引擎的状态机，只做翻译，
+     * 见 [sessionStateOf]）。功能页加载 / 面板自动重载 / 设置页卸载，
+     * 订阅方都会收到同一次变化，不存在两份状态打架。
+     */
+    val sessionState: Flow<SessionState> by lazy {
+        combine(engine.state, _loadedKey) { s, key -> sessionStateOf(s, key != null) }
+            .distinctUntilChanged()
+    }
 
     /** 找设备上的 GGUF：优先外部私有目录，再退回内部存储（内置包会释放到 files/models）。 */
     fun findModel(): File? {

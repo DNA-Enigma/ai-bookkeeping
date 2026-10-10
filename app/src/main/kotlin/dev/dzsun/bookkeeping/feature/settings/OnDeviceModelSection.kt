@@ -39,6 +39,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.dzsun.bookkeeping.core.designsystem.Art
 import dev.dzsun.bookkeeping.llm.ModelInstaller
 import dev.dzsun.bookkeeping.llm.ReadyResult
+import dev.dzsun.bookkeeping.llm.SessionState
 import dev.dzsun.bookkeeping.llm.SparkSession
 import dev.dzsun.bookkeeping.llm.issueMessage
 import java.io.File
@@ -47,6 +48,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -103,6 +105,20 @@ class OnDeviceModelViewModel @Inject constructor(
     private val session: SparkSession,
 ) : ViewModel() {
 
+    /**
+     * 设置页**自己发起的**动作进度（释放 / 加载 / 生成中）与其结算结果（Done / Failed）。
+     * 属主状态还没跟上时由它撑住显示；一旦属主给出权威状态，就交给 [resolveOnDeviceState] 合成。
+     */
+    private val _action = MutableStateFlow<OnDeviceUiState?>(null)
+
+    /**
+     * 对外状态：**属主 [SparkSession.sessionState] + 本地动作合成**，不再自持一份。
+     *
+     * 背景（软测 TC-03/13/18）：以前这里自己攒 `_state`，功能页把模型加载好了
+     * 设置页还显示「未加载」，面板自动重载后又倒回去——两份状态必然漂移。
+     * settled 状态（加载成功 / 失败 / 卸载、生成结果）一律跟随属主，
+     * 只有用户动作进行中的进度保留本地。
+     */
     private val _state = MutableStateFlow<OnDeviceUiState>(OnDeviceUiState.Idle)
     val state: StateFlow<OnDeviceUiState> = _state.asStateFlow()
 
@@ -112,6 +128,14 @@ class OnDeviceModelViewModel @Inject constructor(
     /** 设备上当前能找到的模型文件；释放内置模型后刷新，UI 用它渲染状态行。 */
     private val _modelFile = MutableStateFlow(findModel())
     val modelFile: StateFlow<File?> = _modelFile.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            combine(session.sessionState, _action, _modelFile) { owner, action, file ->
+                resolveOnDeviceState(owner, action, file?.absolutePath.orEmpty())
+            }.collect { _state.value = it }
+        }
+    }
 
     /** 找设备上的 GGUF：优先应用私有目录（免权限），再退回外部下载目录。 */
     fun findModel(): File? {
@@ -145,31 +169,31 @@ class OnDeviceModelViewModel @Inject constructor(
     private fun installBundledModel() {
         viewModelScope.launch {
             val total = withContext(Dispatchers.IO) { installer.expectedBytes() }
-            _state.value = OnDeviceUiState.Installing(0f, 0L, total)
+            _action.value = OnDeviceUiState.Installing(0f, 0L, total)
             val result = try {
                 withContext(Dispatchers.IO) {
                     installer.ensure { p ->
                         // StateFlow 写入线程安全；UI 在主线程 collect，这里直接回写进度
                         val done = if (total > 0) (p * total).toLong() else -1L
-                        _state.value = OnDeviceUiState.Installing(p, done, total)
+                        _action.value = OnDeviceUiState.Installing(p, done, total)
                     }
                 }
             } catch (e: Throwable) {
-                _state.value = OnDeviceUiState.Failed("释放模型失败：${e.message ?: e.javaClass.simpleName}")
+                _action.value = OnDeviceUiState.Failed("释放模型失败：${e.message ?: e.javaClass.simpleName}")
                 Log.e(TAG, "install bundled model failed", e)
                 return@launch
             }
             _modelFile.value = findModel()
             when {
                 result is ModelInstaller.Result.Failed -> {
-                    _state.value = OnDeviceUiState.Failed(result.message)
+                    _action.value = OnDeviceUiState.Failed(result.message)
                     Log.w(TAG, "install bundled model failed: ${result.message}")
                 }
                 _modelFile.value != null -> {
                     Log.i(TAG, "bundled model installed: ${_modelFile.value!!.absolutePath}")
                     loadFile(_modelFile.value!!)
                 }
-                else -> _state.value = OnDeviceUiState.Failed("释放后仍找不到模型文件")
+                else -> _action.value = OnDeviceUiState.Failed("释放后仍找不到模型文件")
             }
         }
     }
@@ -182,16 +206,17 @@ class OnDeviceModelViewModel @Inject constructor(
      */
     private fun loadFile(file: File) {
         viewModelScope.launch {
-            _state.value = OnDeviceUiState.Loading(file.absolutePath)
+            _action.value = OnDeviceUiState.Loading(file.absolutePath)
             when (val result = session.ensureReady()) {
                 is ReadyResult.Ready -> {
-                    _state.value = OnDeviceUiState.Ready(file.absolutePath)
+                    // 加载成功是 settled 状态：清掉本地动作，显示交给属主的 Ready
+                    _action.value = null
                     Log.i(TAG, "model loaded: ${file.absolutePath} (${file.length() / 1024 / 1024} MB)")
                 }
 
                 is ReadyResult.Failed -> {
                     val why = issueMessage(result.issue)
-                    _state.value = OnDeviceUiState.Failed(why)
+                    _action.value = OnDeviceUiState.Failed(why)
                     Log.e(TAG, "model load failed: $why")
                 }
             }
@@ -205,7 +230,7 @@ class OnDeviceModelViewModel @Inject constructor(
             val ready = session.ensureReady()
             if (ready is ReadyResult.Failed) {
                 val why = issueMessage(ready.issue)
-                _state.value = OnDeviceUiState.Failed(why)
+                _action.value = OnDeviceUiState.Failed(why)
                 Log.w(TAG, "generate blocked: $why")
                 return@launch
             }
@@ -215,16 +240,16 @@ class OnDeviceModelViewModel @Inject constructor(
             var firstTokenAt = 0L
             val sb = StringBuilder()
             var chunks = 0
-            _state.value = OnDeviceUiState.Running(path, "")
+            _action.value = OnDeviceUiState.Running(path, "")
             try {
                 session.llm.generate(prompt).collect { piece ->
                     if (firstTokenAt == 0L) firstTokenAt = SystemClock.elapsedRealtime()
                     sb.append(piece)
                     chunks++
-                    _state.value = OnDeviceUiState.Running(path, sb.toString())
+                    _action.value = OnDeviceUiState.Running(path, sb.toString())
                 }
                 val now = SystemClock.elapsedRealtime()
-                _state.value = OnDeviceUiState.Done(
+                _action.value = OnDeviceUiState.Done(
                     path = path,
                     output = sb.toString(),
                     firstTokenMs = if (firstTokenAt == 0L) 0L else firstTokenAt - t0,
@@ -237,7 +262,7 @@ class OnDeviceModelViewModel @Inject constructor(
                         "total=${now - t0}ms chunks=$chunks out=${sb.take(120)}"
                 )
             } catch (e: Throwable) {
-                _state.value = OnDeviceUiState.Failed("生成失败：${e.message ?: e.javaClass.simpleName}")
+                _action.value = OnDeviceUiState.Failed("生成失败：${e.message ?: e.javaClass.simpleName}")
                 Log.e(TAG, "generate failed", e)
             }
         }
@@ -247,12 +272,51 @@ class OnDeviceModelViewModel @Inject constructor(
         // 交给属主：session 会连同 loadedKey / inFlightPrompt 一起清掉，
         // 这里自己 free 的话 session 还以为模型在，下一次 ensureReady 会直接给错状态。
         session.unload()
-        _state.value = OnDeviceUiState.Idle
+        // 卸载同样交给属主：loadedKey 一清，sessionState 随即变 Idle，这里只撤掉本地动作
+        _action.value = null
     }
 
     companion object {
         private const val TAG = "OnDeviceModel"
     }
+}
+
+/**
+ * 属主状态 + 设置页本地动作 → 界面要显示的状态。纯函数，单测直接钉三条判定标准。
+ *
+ * 合成口径（顺序即优先级）：
+ *  1. **用户动作进行中**（释放 / 加载 / 生成中）以动作为准 —— 属主状态还没跟上；
+ *  2. 属主 Error → Failed（原因给用户看）；但设置页自己刚报的 Failed 更具体，保留它；
+ *  3. 属主 Loading / Generating → 对应的加载中 / 生成中（生成中丢不掉，文本由动作补）；
+ *  4. 属主 Ready → 已加载；设置页自己的结算结果（生成耗时 Done、失败原因 Failed）保留；
+ *  5. 属主 Idle → 未加载；仅保留设置页自己的 Failed（加载失败的原因不能被 Idle 冲掉）。
+ *
+ * 三条判定标准就落在这里：
+ *  ① 功能页加载后（owner=Ready，无本地动作）→ 设置页显示已加载；
+ *  ② 面板/对话页自动重载后（owner=Ready，本地动作是旧的 Idle）→ 不退回未加载；
+ *  ③ 设置页卸载后（owner=Idle，本地动作清空）→ 回到未加载。
+ */
+internal fun resolveOnDeviceState(
+    owner: SessionState,
+    action: OnDeviceUiState?,
+    path: String,
+): OnDeviceUiState = when {
+    action is OnDeviceUiState.Installing ||
+        action is OnDeviceUiState.Loading ||
+        action is OnDeviceUiState.Running -> action
+
+    owner is SessionState.Error ->
+        if (action is OnDeviceUiState.Failed) action else OnDeviceUiState.Failed(owner.message)
+
+    owner is SessionState.Loading -> OnDeviceUiState.Loading(path)
+    owner is SessionState.Generating -> OnDeviceUiState.Running(path, "")
+
+    owner is SessionState.Ready ->
+        if (action is OnDeviceUiState.Done || action is OnDeviceUiState.Failed) action
+        else OnDeviceUiState.Ready(path)
+
+    // owner Idle
+    else -> if (action is OnDeviceUiState.Failed) action else OnDeviceUiState.Idle
 }
 
 /* ------------------------------ UI ------------------------------ */
