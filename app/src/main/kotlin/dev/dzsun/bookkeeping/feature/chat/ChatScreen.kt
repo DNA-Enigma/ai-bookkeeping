@@ -62,6 +62,7 @@ import dev.dzsun.bookkeeping.core.designsystem.*
 import dev.dzsun.bookkeeping.feature.ask.AskStage
 import dev.dzsun.bookkeeping.feature.ask.AskViewModel
 import dev.dzsun.bookkeeping.feature.entry.AddEntryViewModel
+import dev.dzsun.bookkeeping.feature.entry.ParseSource
 import java.time.LocalDate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -88,8 +89,17 @@ data class ParsedEntry(val category: String, val note: String, val amountText: S
 
 sealed class ChatMsg {
     data class Text(val fromAgent: Boolean, val body: String) : ChatMsg()
-    /** [raw] 是用户原话，「修改」时回填输入框用。 */
-    data class EntryCard(val entry: ParsedEntry, val raw: String) : ChatMsg()
+
+    /**
+     * [raw] 是用户原话，「修改」时回填输入框用。
+     * [source] 是这张卡的来源：模型给的数组走 [ParseSource.MODEL]，
+     * 模型只回了一句话、由本地规则补出来的卡走 [ParseSource.RULES]（卡上标「规则解析」）。
+     */
+    data class EntryCard(
+        val entry: ParsedEntry,
+        val raw: String,
+        val source: ParseSource = ParseSource.MODEL,
+    ) : ChatMsg()
 }
 
 @Composable
@@ -235,7 +245,26 @@ fun ChatScreen(
                     }
                 }
 
-                is AzhangTurn.Reply -> messages += ChatMsg.Text(true, turn.body)
+                is AzhangTurn.Reply -> {
+                    // 模型那句话照常显示；它没给数组时，保底规则补出来的卡片跟在后面
+                    // （见 withRulesEntryFallback）——这样「账一定记得上」不依赖模型守约。
+                    messages += ChatMsg.Text(true, turn.body)
+                    if (turn.entries.isNotEmpty()) {
+                        val e = turn.entries.first()
+                        messages += ChatMsg.EntryCard(
+                            entry = ParsedEntry(
+                                category = e.categoryName,
+                                note = e.note.ifBlank { text },
+                                amountText = e.amountText,
+                            ),
+                            raw = text,
+                            source = ParseSource.RULES,
+                        )
+                        if (turn.entries.size > 1) {
+                            messages += ChatMsg.Text(true, "识别到 ${turn.entries.size} 笔，先记第一笔，其余的再补。")
+                        }
+                    }
+                }
 
                 is AzhangTurn.Unavailable -> {
                     // 降级回答照旧给（规则识别/寒暄话术），但**原因也要摆出来**——
@@ -299,6 +328,7 @@ fun ChatScreen(
                     is ChatMsg.Text -> TextBubble(msg.fromAgent, msg.body)
                     is ChatMsg.EntryCard -> EntryBubble(
                         entry = msg.entry,
+                        source = msg.source,
                         onConfirm = { confirmEntry(msg) },
                         onEdit = {
                             // 「修改」= 把原话回填输入框，让用户改完重发。
@@ -402,6 +432,7 @@ private fun EntryBubble(
     entry: ParsedEntry,
     onConfirm: () -> Unit,
     onEdit: () -> Unit,
+    source: ParseSource = ParseSource.MODEL,
 ) {
     val p = Art.colors
     // 按过任一按钮就锁住：既不能再点「确认入账」，也不能重复点「修改」。
@@ -428,7 +459,12 @@ private fun EntryBubble(
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
             Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(entry.category, entry.note, "今天").forEach { tag ->
+                // 来源标进卡片：规则补出来的卡要让用户看得见，别当成模型认出来的
+                val tags = buildList {
+                    add(entry.category); add(entry.note); add("今天")
+                    if (source == ParseSource.RULES) add("规则解析")
+                }
+                tags.forEach { tag ->
                     Box(Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, p.line, RoundedCornerShape(999.dp)).padding(horizontal = 12.dp, vertical = 4.dp)) {
                         Text(tag, style = TextStyle(fontSize = 11.5.sp, letterSpacing = 1.sp), color = p.ink2)
                     }

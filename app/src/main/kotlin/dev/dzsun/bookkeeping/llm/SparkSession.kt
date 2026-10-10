@@ -224,30 +224,6 @@ class SparkSession @Inject constructor(
         emptyList()
     }
 
-    private fun buildSystemPrompt(expense: List<String>, income: List<String>): String = buildString {
-        append("你是「阿账」，一个运行在用户设备**本地**的记账管家，用简体中文，简短直接、不废话。\n")
-        append("你会收到两种输入，输出格式严格二选一，不要输出 JSON 之外的任何文字、解释或 markdown。\n\n")
-        append("A. 输入以【记账解析】开头：只输出 JSON **数组**，元素为\n")
-        append("   {\"kind\":\"expense\"或\"income\",\"amount\":数字(元,最多两位小数),")
-        append("\"category\":\"分类名\",\"note\":\"不超过10字的备注\",\"payee\":\"商户,没有就空串\",")
-        append("\"confidence\":0到1}\n")
-        append("   不是真实消费/收入（闲聊、查询统计、转账、退款）时输出 []。\n")
-        append("   分类只能从这里选，不得自造：\n")
-        append("     支出：").append(expense.joinToString("、")).append("\n")
-        append("     收入：").append(income.joinToString("、")).append("\n")
-        append("   多笔合并拆成多个元素；中文数字转阿拉伯（五十块→50）；单位统一元。\n\n")
-        append("B. 输入以【对话】开头：\n")
-        append("   - 只输出 JSON，不要 JSON 之外的任何文字、解释或 markdown。\n")
-        append("   - 用户其实在报一笔账 → 输出 A 的 JSON 数组（上层会弹出记账卡片）\n")
-        append("   - 否则输出 {\"reply\":\"你的回答\"}，60 字以内，**不编造具体金额、比例和统计数字**；\n")
-        append("     用户在问「花了多少」「哪类最多」这类要查账的问题，reply 一律只写「查账」\n")
-        append("     （上层会去查本地账本，不会让你算数）。\n")
-        append("   - 输入是问候、闲聊、英文、或你看不懂的内容，**也必须**输出 {\"reply\":\"...\"}，\n")
-        append("     用一句自然的中文回应（打个招呼，或请对方说清楚想记什么）。\n")
-        append("   - **绝不输出**括号说明、道歉或占位文本（例如「（暂无具体对话内容）」「无法回答」）。\n")
-        append("     说不出口的话就写进 reply 里，不要写在 JSON 外面。\n")
-    }
-
     companion object {
         private const val TAG = "SparkSession"
 
@@ -271,4 +247,42 @@ class SparkSession @Inject constructor(
         /** 阿账对话模式的用户消息前缀。 */
         const val MODE_CHAT = "【对话】\n"
     }
+}
+
+/**
+ * 全 App 唯一的系统提示（[SparkSession.systemPrompt] 懒算一次的那一份）。
+ *
+ * 抽成顶层函数是为了**能直接单测 few-shot 段落**：B 段的判据与例子就是对话模式下
+ * 「报账 → 数组 / 查账 → reply=查账 / 闲聊 → reply」的分流规则本身，
+ * 测不到的提示词等于没写 —— 实测里它只有一句话时模型 6 次含金额输入全走成了闲聊。
+ */
+internal fun buildSystemPrompt(expense: List<String>, income: List<String>): String = buildString {
+    append("你是「阿账」，一个运行在用户设备**本地**的记账管家，用简体中文，简短直接、不废话。\n")
+    append("你会收到两种输入，输出格式严格二选一，不要输出 JSON 之外的任何文字、解释或 markdown。\n\n")
+    append("A. 输入以【记账解析】开头：只输出 JSON **数组**，元素为\n")
+    append("   {\"kind\":\"expense\"或\"income\",\"amount\":数字(元,最多两位小数),")
+    append("\"category\":\"分类名\",\"note\":\"不超过10字的备注\",\"payee\":\"商户,没有就空串\",")
+    append("\"confidence\":0到1}\n")
+    append("   不是真实消费/收入（闲聊、查询统计、转账、退款）时输出 []。\n")
+    append("   分类只能从这里选，不得自造：\n")
+    append("     支出：").append(expense.joinToString("、")).append("\n")
+    append("     收入：").append(income.joinToString("、")).append("\n")
+    append("   多笔合并拆成多个元素；中文数字转阿拉伯（五十块→50）；单位统一元。\n\n")
+    append("B. 输入以【对话】开头：\n")
+    append("   - 只输出 JSON，不要 JSON 之外的任何文字、解释或 markdown。\n")
+    append("   - **判据（先看这条再选格式）**：句子里出现了**具体金额**和**买了什么**，")
+    append("用户就是在报一笔账 → 输出 A 的 JSON 数组（上层会弹出记账卡片）；\n")
+    append("     只是在问「花了多少」「哪类最多」这类要统计的 → 查账；除此之外才是说话。\n")
+    append("   - 三组例子，照着来（同样是这三类，别再自己发挥）：\n")
+    append("     报账：「午饭花了 35」 → ")
+    append("[{\"kind\":\"expense\",\"amount\":35,\"category\":\"餐饮\",\"note\":\"午饭\",\"payee\":\"\",\"confidence\":0.9}]\n")
+    append("     查账：「这个月花了多少」「哪类最多」 → {\"reply\":\"查账\"}\n")
+    append("     说话：「你好」「在吗」 → {\"reply\":\"你好，我是阿账，想记一笔就说一声。\"}\n")
+    append("   - 否则输出 {\"reply\":\"你的回答\"}，60 字以内，**不编造具体金额、比例和统计数字**；\n")
+    append("     用户在问「花了多少」「哪类最多」这类要查账的问题，reply 一律只写「查账」\n")
+    append("     （上层会去查本地账本，不会让你算数）。\n")
+    append("   - 输入是问候、闲聊、英文、或你看不懂的内容，**也必须**输出 {\"reply\":\"...\"}，\n")
+    append("     用一句自然的中文回应（打个招呼，或请对方说清楚想记什么）。\n")
+    append("   - **绝不输出**括号说明、道歉或占位文本（例如「（暂无具体对话内容）」「无法回答」）。\n")
+    append("     说不出口的话就写进 reply 里，不要写在 JSON 外面。\n")
 }

@@ -5,6 +5,7 @@ import dev.dzsun.bookkeeping.llm.ReadyResult
 import dev.dzsun.bookkeeping.llm.ReplyStreamFilter
 import dev.dzsun.bookkeeping.llm.SparkSession
 import dev.dzsun.bookkeeping.llm.issueMessage
+import dev.dzsun.bookkeeping.feature.entry.LocalAiParser
 import dev.dzsun.bookkeeping.feature.entry.SparkAiParser
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -42,8 +43,16 @@ sealed interface AzhangTurn {
      * 模型的自然语言回答。
      * [isLedgerQuery] 为 true 表示模型自己不答数字、让上层去查本地账本 ——
      * **计算交给 SQL，模型只翻译意图**，这是不让它编金额的关键。
+     *
+     * [entries] 是**保底补出来的记账卡片**（见 [withRulesEntryFallback]）：
+     * 模型明明收到一句报账却只回了一句话时，界面要**既显示这句话、又出卡**，
+     * 否则用户这句话就白说了。恒为 [ParseSource.RULES] 来源，非空时才有效。
      */
-    data class Reply(val body: String, val isLedgerQuery: Boolean = false) : AzhangTurn
+    data class Reply(
+        val body: String,
+        val isLedgerQuery: Boolean = false,
+        val entries: List<dev.dzsun.bookkeeping.feature.entry.ParsedEntry> = emptyList(),
+    ) : AzhangTurn
 
     /**
      * 模型不可用（没模型 / 引擎状态卡死 / 超时 / 输出不合法）→ 调用方退回原来的规则与问答链路。
@@ -70,6 +79,8 @@ sealed interface AzhangTurn {
  *  4. **非 JSON 输出先纠错再降级**：补救提示重试 1 次 → 仍是纯文本就按原话展示
  *     （数字护栏拦下的除外），见 [repairChatOutput]。用户聊天宁可看到模型原话，
  *     也不要看到「这次没答上」。
+ *  5. **模型没给数组也要让账记得上**：回了话就再用本地规则解析兜一次底，
+ *     见 [withRulesEntryFallback]。
  */
 @Singleton
 class AzhangChat @Inject constructor(
@@ -78,6 +89,12 @@ class AzhangChat @Inject constructor(
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    /**
+     * 离线规则解析器 —— 只在**模型回了话却没给数组**时兜一次底（见 [withRulesEntryFallback]）。
+     * 复用记一笔那条路已经在用的本地解析器，不另造关键词表。
+     */
+    private val rulesParser = LocalAiParser()
 
     /**
      * 预热：进 AI 页面就把模型加载好，别让用户第一条消息先等几十秒。
@@ -207,19 +224,32 @@ class AzhangChat @Inject constructor(
         text: String,
         out: String,
         remedyTimeoutMs: Long,
-    ): AzhangTurn = repairChatOutput(
+    ): AzhangTurn = withRulesEntryFallback(
         text = text,
-        firstOut = out,
-        parse = { interpret(it) },
-        remedy = {
-            withTimeoutOrNull(remedyTimeoutMs) {
-                session.complete(remedyPrompt(text), REMEDY_MAX_TOKENS)
-            }
-        },
-        log = { level, message ->
-            if (level == LogLevel.W) Log.w(TAG, message) else Log.i(TAG, message)
-        },
+        turn = repairChatOutput(
+            text = text,
+            firstOut = out,
+            parse = { interpret(it) },
+            remedy = {
+                withTimeoutOrNull(remedyTimeoutMs) {
+                    session.complete(remedyPrompt(text), REMEDY_MAX_TOKENS)
+                }
+            },
+            log = { level, message ->
+                if (level == LogLevel.W) Log.w(TAG, message) else Log.i(TAG, message)
+            },
+        ),
+        parse = { rulesParser.parse(it) },
+        isKnownCategory = ::isKnownCategory,
     )
+
+    /** 分类必须落得进科目表，否则用户点确认时按名字找不到账户。 */
+    private fun isKnownCategory(entry: dev.dzsun.bookkeeping.feature.entry.ParsedEntry): Boolean =
+        if (entry.kind == dev.dzsun.bookkeeping.feature.entry.EntryKind.INCOME) {
+            entry.categoryName in session.incomeCategories
+        } else {
+            entry.categoryName in session.expenseCategories
+        }
 
     private fun extractReply(out: String): String? {
         val s = out.indexOf('{')
@@ -309,6 +339,37 @@ private fun chatReply(trimmed: String): AzhangTurn.Reply = AzhangTurn.Reply(
     body = if (trimmed == AzhangChat.QUERY_KEYWORD) AzhangChat.QUERY_FALLBACK_TEXT else trimmed,
     isLedgerQuery = trimmed == AzhangChat.QUERY_KEYWORD,
 )
+
+/**
+ * 对话保底出卡：模型**回了话（含「查账」信号）却没给数组**时，拿用户原话再走一次
+ * 已有的离线规则解析（[LocalAiParser]），解析得出条目就把卡片挂到回复上，
+ * 界面因此**既显示模型那句话、又出记账确认卡**。
+ *
+ * 为什么必须有这一层：实测对话模式下含金额的报账 6/6 次都没输出数组
+ * （同一批句子走记账解析模式 5/5 全对）——分流靠提示词是概率性的，
+ * 而「账记不上」没有第二次机会，所以再补一条确定性的规则兜底。
+ *
+ * 三条口径：
+ *  1. **模型已经给了数组就不碰规则**（[AzhangTurn.Entry] 原样返回，[parse] 一次都不调）；
+ *  2. 金额必须 > 0 且**分类能落进科目表**（[isKnownCategory]），否则不出卡；
+ *  3. 来源一律是规则（`ParseSource.RULES`），卡片上要标出来——
+ *     别让用户以为字段是模型认出来的。
+ *
+ * 解析器与科目表判定都注入，所以单测不需要 Android、不需要引擎。
+ */
+internal suspend fun withRulesEntryFallback(
+    text: String,
+    turn: AzhangTurn,
+    parse: suspend (String) -> List<dev.dzsun.bookkeeping.feature.entry.ParsedEntry>,
+    isKnownCategory: (dev.dzsun.bookkeeping.feature.entry.ParsedEntry) -> Boolean,
+): AzhangTurn {
+    if (turn !is AzhangTurn.Reply) return turn
+    val entries = parse(text).filter { entry ->
+        entry.amountText.toBigDecimalOrNull()?.signum() == 1 && isKnownCategory(entry)
+    }
+    if (entries.isEmpty()) return turn
+    return turn.copy(entries = entries)
+}
 
 /**
  * 对话输出的解析与纠错：[parse] 解读不了就用 [remedy] 补救重试，

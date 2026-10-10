@@ -127,6 +127,8 @@ fun AiFloatPanel(
                 result is AzhangTurn.Reply -> {
                     // 模型认领「查账」→ 不编数字，换成能直接照做的引导
                     reply = if (result.isLedgerQuery) QUERY_GUIDE else result.body
+                    // 模型只回了话、由本地规则补出来的卡片，照样出 —— 见 withRulesEntryFallback
+                    result.entries.firstOrNull()?.let { entry = it }
                     status = PanelStatus.DONE
                 }
 
