@@ -44,3 +44,52 @@
 | TC-18 | PASS | 设置页 `未加载 → 加载中… → 已加载 · 可以生成了`（t=102s）→ 点「卸载」状态**立即**回 `未加载 · 点「加载模型」`（无旧文案残留）→ 首页面板发 `hello` 触发自动重载（`Model loaded!` **1→2**，属预期）→ 92s 超时给**具体原因**「这次生成超时了（超过 90 秒没出结果）」（已知问题①）→ 回设置页状态行显示 `未加载 · 点「加载模型」`，而进程 7599 的模型**实际仍在内存**（`Model loaded!`×2、`Model unloaded!`×1，之后无第二次卸载）——**不谎报「已加载」**（本用例硬判据通过），但反向状态不同步 = **已知问题③的另一面**；`Unloading model`=1、FATAL=0 | docs/screenshots/2026-10-10/TC18-1-loaded.png、TC18-2-unloaded.png、TC18-3-panel-recover.png、TC18-4-settings-after.png；/tmp/tc18_log.txt |
 | TC-21 | PASS（仅留痕） | 四组数全部抄到（**x86_64 模拟器口径，不得当真机指标引用**）：① `Model loaded! → System prompt processed!` = **97.1 / 97.0 / 97.2 / 97.3 / 100.1 s**（TC-01/02/10/18/05 五个窗口，解码统一系统提示词是大头，模型本体 load 只 2s）；② 设置页生成 `firstToken=8186ms total=18177ms chunks=28`（TC-09）、`firstToken=8278ms total=15431ms chunks=21`（TC-10）；③ 面板首条消息到首个状态变化 **2s**（本轮 TC-05 实测；TC-02 为 7s，判据 ≤20s 均满足）；④ 批测 `平均=37742ms`（5 条，含首条冷启动 115341ms） | /tmp/tc01_log.txt、tc02、tc09、tc10、tc18、tc05、tc08 各日志；原始行见本节 |
 | TC-24 | PASS | `tools/build.sh :app:testDebugUnitTest --rerun`（Gradle 9.8.0 / JDK 见 tools/build.sh）→ **BUILD SUCCESSFUL**；`app/build/test-results/testDebugUnitTest/` 共 **40 个测试类 XML，tests=472、failures=0、errors=0**（12:50 重跑产物，非缓存旧结果）；新增 `llm.SparkSessionReadyTest` **6 个用例全过**，`feature.chat.AzhangChatRepairTest`、`ChatRoutingTest`、`llm.ReplyStreamFilterTest`、`llm.ThinkingStripperTest` 亦全绿 | `app/build/test-results/testDebugUnitTest/*.xml`（构建产物，未提交）；构建输出末尾 `BUILD SUCCESSFUL` |
+| TC-12 | PASS | 压轴全窗口崩溃巡检：**30 份**已落盘日志（`/tmp/tc*.txt` + `/tmp/cap_*.txt`）合并统计 `FATAL` = **0**、`ANR in` = **0**（逐文件明细见证据文件）；当前 `logcat -d` 缓冲 `FATAL EXCEPTION`=0、`ANR`=0；`dumpsys activity activities | grep topResumedActivity` = `dev.dzsun.bookkeeping/.MainActivity`（t83）。**口径说明**：会话中模拟器重启过一次且多次 `logcat -c`，故取「各阶段落盘日志并集 + 当前缓冲」而非单次 buffer | /tmp/tc12_full.txt、/tmp/tc12_buffer.txt |
+
+## 三、失败明细（FAIL / BLOCKED，只记录不修）
+
+> 本节只收**原 24 条**的失败；加测章节（TC-25 起）的 FAIL/BLOCKED 见第六节。
+
+### TC-03 · FAIL —— 功能页加载后，设置页仍显示「未加载」
+
+- **复现**：force-stop + `logcat -c` → 冷启动**不碰设置页** → 对话页点 chip `午饭花了 35`（模型被功能页拉起）→ 回设置页 dump 状态行 → 点「生成」。
+- **观察 vs 预期**：状态行 = `未加载 · 点「加载模型」`（预期：显示已加载）；但点「生成」**直接出结果**（firstToken=8171ms），全窗口 `Model loaded!`=1 —— 界面与引擎**互相矛盾**。
+- **日志/截图**：`/tmp/tc03_log.txt`（`Model loaded!`=1、`Unloading model`=0、FATAL=0）；截图 TC03-3-settings.png、TC03-4-generate-result.png。
+- **怀疑位置**：`feature/settings/OnDeviceModelSection.kt:106` —— `OnDeviceModelViewModel` 自持 `MutableStateFlow<OnDeviceUiState>(Idle)`，只由**本页动作**（load/generate/unload）推进，**不订阅属主 `SparkSession` 的真实状态**；状态行文案在同文件 `:319-321`。
+- **另一面（本轮新增证据）**：TC-18 里方向相反——面板自动重载后设置页仍显示 `未加载`，而引擎确已加载（`Model loaded!`×2、`Model unloaded!`×1）。
+
+### TC-06 · FAIL —— `午饭花了 35` 出 `{"reply":"查账"}`，不出记账卡，库不增
+
+- **复现**：对话页点 chip `午饭花了 35`（含数字 → `classifyChatInput` 判为 `Record`，`ChatRouting.kt:71`）→ 等卡。
+- **观察 vs 预期**：无卡；气泡 = QUERY_FALLBACK_TEXT「这个得看你的真实账本，我不编数字…」；库 N0=**523 → 523**（预期 524）。
+- **日志**：`ai-chat` 中 `Formatted and added assistant message … {"reply":"查账"}`（`/tmp/tc06_log.txt`、`/tmp/tc11_log.txt`、本轮 `/tmp/cap_a.txt` 12:52:04 **共 3 次一致**）。
+- **怀疑位置**：`llm/SparkSession.kt:241-244`（提示词 B 段把「报账」和「查账」的边界交给模型判断）+ `feature/chat/AzhangChat.kt:189-196`（`interpret` 先试数组、否则取 `reply`，`reply=="查账"` 即走查账兜底）+ `feature/chat/ChatScreen.kt:238`。
+- **连带**：规则出卡入口 `ChatScreen.kt:158-168 entryParse` 只在模型不可用时由 `legacyReply`（`:202`）兜底触达 —— **模型在位时对话页拿不到记账卡**。
+
+### TC-17 · FAIL —— 面板 `28` 冷启动 92s 超时，降级后仍不出卡
+
+- **复现**：面板输入 `28` → 发送。
+- **观察 vs 预期**：界面「这次生成超时了（超过 90 秒没出结果）」（logcat 系统提示词解码 10:56:10→10:57:48 = **98s > 90s**，已知问题①）；转对话页 chip `午饭花了 35` 再次得到 `{"reply":"查账"}` → 仍无卡，库 523→523。
+- **日志/截图**：`/tmp/tc17_log.txt`、`/tmp/tc17b_log.txt`；TC17-1-panel-result.png、TC17-3-chat-card.png。
+- **怀疑位置**：`feature/chat/AiFloatPanel.kt:383`（90s 文案）与冷启动解码 97~100s 的矛盾（见 TC-21 数据）；卡的部分同 TC-06。
+
+## 四、与已知问题的对照
+
+| 编号 | 已知问题 | 本轮判据 | 结果 | 证据 |
+|---|---|---|---|---|
+| A1 / 根因1 | 二次加载（功能页重复 `Model loaded!`） | 每轮 `grep -ac 'Model loaded!'` | **不复现**：TC-01/02/05/07/09/13/15/18 各窗口均为 1（TC-18 卸载后重载 =2 属预期） | 各 `/tmp/tcNN_log.txt` |
+| A2 / 根因2 | 报错文案与 logcat 不一致 | 界面文案与 `AzhangChat:`/`InferenceEngineImpl` 原文比对 | **不复现**：TC-04 面板原因与 logcat **逐字一致**；TC-05 非 JSON 原因与 logcat 同源 | TC04-1、TC05-1、/tmp/tc04_log.txt |
+| A3 / B2 | 非记账输入只给占位文本 | `hello`/`28` 的原始输出归类 | **不复现占位文本**：均为自然中文问候/解释；但**首次输出常为纯文本**，靠 `补救重试 1/1` 兜回 JSON（见 TC-23、附录 A） | /tmp/tc23*.txt、tc22_log.txt |
+| 已知① | 冷启动系统提示词解码 98~149s > 面板 90s 预算 | 冷启动面板消息是否超时 | **仍复现 4 次**（TC-05/11/18 各 92s；TC-03 曾 146s）；解码耗时本轮实测 97.0~100.1s | TC-21 数据；TC05-1、TC18-3 |
+| 已知② | `午饭花了 35` → `{"reply":"查账"}` 不出卡 | 出卡与否 | **仍复现 3/3**（TC-06、TC-17、TC-25A）；第 4 次（TC-31）改回普通闲聊回复，**同样不出卡** | 附录 A |
+| 已知③ | 功能页加载后设置页显「未加载」 | 状态行 vs 引擎真实状态 | **仍复现**，且发现**反向**同样不同步（TC-18：引擎已加载、设置页仍显未加载） | TC03-3、TC18-4 |
+
+## 五、执行中的环境问题（与产品缺陷分开列）
+
+1. **logcat 环形缓冲被冲掉**：`ai-chat` 的 token 级 `V` 日志一个冷启动就上千行，把默认缓冲冲掉，导致 TC-11 窗口里 `AzhangChat:` 行**一条都不剩**。处置：改用 `adb logcat -G 16M` 放大缓冲（本节之后的窗口均正常）；统计崩溃时改为「落盘日志并集」口径（TC-12）。
+2. **中文无法入框**：`adb shell input text` 只吃 ASCII，中文一律点界面 chip（本轮全部走 chip / 坐标来自 dump）。
+3. **模拟器中途重启过一次**（11:52 上一位测试员停摆后），11:52 前的日志随重启丢失，之前阶段的日志已各自落盘 `/tmp/tcNN_log.txt`。
+4. **uiautomator dump 慢**：单次 dump 约 3~5s，导致「逐字上屏」采样分辨率有限（面板侧仍抓到 3 个增长点）；对话页只能证明「整段上屏」。
+5. **拍照入口会抢焦点**：点记一笔面板「拍一张」直接拉起系统相机（甚至触发 Google Lens 权限框），需 `keyevent 4`/`3` 或 `am force-stop com.android.camera2` 收回，否则后续 dump 抓到的是相机屏（本轮踩过一次）。
+6. **/data 余量**：整盘 5.8G 已用 5.1G，可用仅 **513M**（模型 1.03GiB 常驻 `files/models/` + `/data/local/tmp/Spark-backup.gguf` 1.03GiB 备份）；跑批测/装包前需留意。
+7. **单测与模拟器抢 CPU**：TC-24 的 `--rerun` 排在全部设备用例之后执行，避免影响耗时判据。
