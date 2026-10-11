@@ -30,6 +30,25 @@ android {
         }
     }
 
+    // 两个分发口味（比赛要求 APK ≤ 1 GB，而内置模型就占 1.03 GiB，只能靠拆包解决）：
+    //   full —— 内置 GGUF，装上即用，包体 ~1.05 GiB（**超过比赛上限**，仅供端侧全功能场景）
+    //   lite —— 不含 GGUF，模型首次启动时下载，包体 ~21 MB（**比赛提交用这一档**）
+    // 两者 applicationId 不同，可同机共存，便于并排对比。
+    flavorDimensions += "dist"
+
+    productFlavors {
+        create("full") {
+            dimension = "dist"
+            versionNameSuffix = "-full"
+            applicationIdSuffix = ".full"
+        }
+        create("lite") {
+            dimension = "dist"
+            versionNameSuffix = "-lite"
+            applicationIdSuffix = ".lite"
+        }
+    }
+
     // 发布签名：材料在 keystore/（不进 git，见 keystore/README.txt）。
     // properties 缺失时不禁用构建——release 出未签名包，由 tools/release-apk.sh 断言拦住。
     signingConfigs {
@@ -80,8 +99,11 @@ android {
     // 资产放在**仓库外**的 ~/projects/model-assets/（1.1 GB，绝不能进 git），
     // 这里用硬链接保持同一 inode，改模型不用重拷。
     // 目录不存在时 AGP 会跳过该 srcDir，所以没有模型也能正常构建（只是端侧功能退化）。
+    //
+    // ⚠️ 这个 srcDir 挂在 **full 口味**上，不是 main。挂在 main 上的话所有变体都会
+    // 被塞进 1 GB 的 GGUF，lite 就不存在了——拆包的全部意义就在于这一行挂在哪。
     sourceSets {
-        getByName("main") {
+        getByName("full") {
             assets.srcDir(rootProject.file("../model-assets"))
         }
     }
@@ -113,6 +135,21 @@ kotlin {
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+// 加了 flavor 之后 AGP 只生成 `testFullDebugUnitTest` / `testLiteDebugUnitTest`，
+// 不再有 `testDebugUnitTest`。而那个名字在 AGENTS.md、docs/**、tools/** 里被引用了
+// 十几处，是团队的习惯命令——直接消失会变成一句 "Task not found"，
+// 谁也不知道该换成什么。这里补一个别名把它接回来。
+//
+// 依赖**两个口味**而不是只挑 full：lite 今天只是少一份模型资产，但哪天它长出
+// 自己的 resources/ 或代码，只跑 full 就会悄悄漏掉。宁可多跑一遍。
+// （日常迭代想省时间就直呼 `:app:testFullDebugUnitTest`。）
+// 注意测试报告路径也随之变成 app/build/test-results/test{Full,Lite}DebugUnitTest/。
+tasks.register("testDebugUnitTest") {
+    group = "verification"
+    description = "跑 full + lite 两个口味 debug 变体的单测（AGP 加 flavor 后不再自动生成此名）"
+    dependsOn("testFullDebugUnitTest", "testLiteDebugUnitTest")
 }
 
 dependencies {
