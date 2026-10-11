@@ -1,10 +1,14 @@
 package dev.dzsun.bookkeeping.feature.chat
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,7 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -39,21 +43,27 @@ import androidx.compose.material3.Text
 import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -95,6 +105,45 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 data class ParsedEntry(val category: String, val note: String, val amountText: String)
 
+/**
+ * 消息流 + 由它折出来的轮次。两个字段**一起变**，所以装在一个持有者里，
+ * 调用方不要把其中一个单独拿出来当状态——那样会读到「消息新、轮次旧」的中间态。
+ *
+ * 写入一律走 [add]：直接动 [messages] 会绕过轮次重算，卡片就会少一项或多一项。
+ */
+@Stable
+internal class ChatFeed {
+    val messages = mutableStateListOf<ChatMsg>()
+    var rounds by mutableStateOf<List<ChatRound>>(emptyList())
+
+    fun add(msg: ChatMsg) {
+        messages.add(msg)
+        rounds = groupRounds(messages)
+    }
+}
+
+/**
+ * 流式正文草稿的容器。
+ *
+ * ## 为什么不直接当参数传，也不在页面顶层读
+ *
+ * 草稿每来一块就变一次。它要是**页面顶层的 mutableStateOf**（改造前就是
+ * `var liveReply by remember { mutableStateOf("") }`），读它的 `LazyColumn { }`
+ * 内容作用域整块失效——气泡、输入框、chips、滚动全跟着重画。
+ *
+ * 同一件事 [ThinkingSection] 已经用「稳定对象进、内容在组件内部读」解决过一次，
+ * 这里照搬，而且不需要 CompositionLocal：传**对象**（引用恒定 → 参数比较相等 →
+ * 其余卡片整体跳过），卡片**只在 live 时**才去读 `.text`。没读就没有订阅，
+ * 快照系统只让真正读它的那一项失效。
+ *
+ * [thinkingOn] 那个布尔量仍留在页面顶层：一轮只翻转两次，读它不心疼，
+ * 而它必须在外层决定「这一轮要不要挂思考区」。
+ */
+@Stable
+internal class DraftBuffer {
+    var text by mutableStateOf("")
+}
+
 sealed class ChatMsg {
     /**
      * [source] 非空且不是模型时，气泡下面挂一行来源脚注（含 `src=RULES` 与「去加载模型」），
@@ -130,9 +179,33 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val askState by viewModel.state.collectAsStateWithLifecycle()
 
-    val messages = remember { mutableStateListOf<ChatMsg>() }
+    /**
+     * 扁平消息流 + 由它折出来的轮次，装在**一个持有者的两个字段**里，不是两条独立状态。
+     *
+     * 理由：轮次必须在写入 messages 的同一刻重算。分开放就会出现「新消息已经上屏、
+     * ids 还是旧的」那一帧，LazyColumn 按旧 key 少一项、滚动位置跟着跳。
+     * 两个 `mutableStateOf` 在同一个非 composable lambda 里连续写，快照提交是原子的，
+     * 读侧只看到「旧旧」和「新新」两种状态。
+     *
+     * 历史**不进 saveable**：这个页面从来没有历史持久层（SourceTag / EntryCard
+     * 的可空字段要各自往返编码，是另一件事），进程重建后回到开场白是既有行为，
+     * 折叠状态被 [pruneExpanded] 清掉正好与之自洽。
+     */
+    val feed = remember { ChatFeed() }
+    val messages = feed.messages
     var typing by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
+
+    /**
+     * 用户手动点过的轮次。键是轮次 id，值是展开与否；没点过的走
+     * [isRoundExpandedByDefault]（最近 [DEFAULT_EXPANDED_ROUNDS] 轮展开）。
+     *
+     * 存成一行字符串走默认 String 通道——`Map<String, Boolean>` 进不了 Bundle。
+     * 切后台切回来、旋转、进程重建后重新进入，点过的开合都不丢。
+     */
+    var overrideRaw by rememberSaveable { mutableStateOf("") }
+    /** 已提交过入账的卡片 key，见 [entryCardKey]。同样是「收起即丢 remember」的受害者。 */
+    var confirmedRaw by rememberSaveable { mutableStateOf("") }
 
     // 本地模型单例（EntryPoint 取，不能自己 new —— 会绕过单例导致重复加载模型）。
     // LocalContext 必须在 remember **外面**读：lambda 不是 @Composable 作用域。
@@ -150,12 +223,16 @@ fun ChatScreen(
     var waitStart by remember { mutableStateOf<Long?>(null) }
     val enginePhase = rememberUiPhase(azhang.engineState)
 
-    /** 流式草稿：边生成边显示，收尾时被最终结果替换掉。 */
-    var liveReply by remember { mutableStateOf("") }
+    /**
+     * 流式草稿。装进 [DraftBuffer] 而不是裸的 `mutableStateOf`，理由写在
+     * 那个类的注释里：正文每来一块都变，页面顶层读它就是把整页卷进重画。
+     * 只有正在生成的那一张卡片会读 `.text`。
+     */
+    val draft = remember { DraftBuffer() }
 
     /**
      * 「思考过程」折叠区的状态 —— **独立的一份**，只有 [ThinkingSection] 读它。
-     * 正文草稿（[liveReply]）与思考素材走两条通道，模型每吐一块不会重排整页。
+     * 正文草稿（[draft]）与思考素材走两条通道，模型每吐一块不会重排整页。
      */
     val thinking = remember { ThinkingUiState() }
 
@@ -168,22 +245,78 @@ fun ChatScreen(
      */
     var thinkingOn by remember { mutableStateOf(false) }
 
+    /**
+     * 本轮挂哪张卡片：思考区、流式草稿、等待气泡都只认这一个 id。
+     *
+     * 为什么不能省：改造前那三样都是 `LazyColumn` 末尾的独立 item，归不进任何轮次。
+     * 折叠之后必须知道"挂在哪张卡里"，而**不能靠"最后一轮"**——开场白还在慢慢出来的
+     * 时候用户已经发了下一句，那时上一轮的「查看思考过程」会被算到新一轮头上，
+     * 用户看到一个跟自己问题无关的思考过程。问账链路（ChatIntent.Ask）也靠它
+     * 把「已交给 AI 服务」的等待气泡放进正确的一轮。
+     */
+    var turnRoundId by remember { mutableStateOf<String?>(null) }
+
+    /**
+     * [turnRoundId] 里"此刻真的在跑"的那一份：只有它非空时才算 live（强制展开、
+     * 挂草稿与等待气泡）。一轮结束就置回 null——否则结束后的卡片还顶着 live，
+     * 用户再也收不起它（live 优先于收起是没有的，但「生成中」的提示会赖着不走）。
+     */
+    var runningRoundId by remember { mutableStateOf<String?>(null) }
+
     /** 上一轮失败的原话 —— 「重试」chip 重发它，而不是让用户重新打一遍。 */
     var retryText by remember { mutableStateOf("") }
 
     fun scroll() {
         scope.launch {
             delay(60)
-            if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size)
+            // 滚到「最后一张卡片」这一项（+1 是越界一格，动画会停在末项），
+            // 而不是滚到消息条数——折叠后一项里装着好几条消息，用条数会滚过头。
+            val count = feed.rounds.size
+            if (count > 0) listState.animateScrollToItem(count)
         }
     }
+
+    /**
+     * 点标题栏。写入前先过一次 [pruneExpanded]：id 是 `round-{下标}`，
+     * 历史里如果哪天出现删除，旧键就会指着一条不存在的轮次，字符串无限膨胀。
+     * 现在没有删除，但这一行让那个前提破了也不会出错。
+     *
+     * 记的是**取反后的绝对值**，不是"记一次收起"：正在生成的那轮走 live 强制展开，
+     * 用户此刻点它就是把默认值写成 false，生成结束后那个选择照样生效。
+     */
+    fun toggleRound(roundId: String, currentlyExpanded: Boolean) {
+        val next = decodeExpanded(overrideRaw).toMutableMap()
+        next[roundId] = !currentlyExpanded
+        overrideRaw = encodeExpanded(pruneExpanded(feed.rounds.map { it.id }, next))
+        // **不滚**。原来每次上屏都 scroll()，是为了让新消息进视野；点标题栏是用户
+        // 自己在挑要看的那一轮，滚到底部会把他刚点开的那张（多半在中间）顶出屏幕。
+        // 高度变化由 AnimatedVisibility 就地动画，不需要列表配合。
+    }
+
+    /** 这张待确认卡是否已经按过「确认入账」——见 [entryCardKey]。 */
+    fun markConfirmed(cardKey: String) {
+        confirmedRaw = encodeConfirmed(decodeConfirmed(confirmedRaw).toList() + cardKey)
+    }
+
+    /**
+     * 开一轮：把刚追加的那条用户消息所在轮次认领为「本轮」。
+     * 必须在 `feed.add` **之后**调用——轮次 id 由分组算出来，早一步就拿不到新一轮。
+     */
+    fun claimTurn() {
+        val id = feed.rounds.lastOrNull()?.id
+        turnRoundId = id
+        runningRoundId = id
+    }
+
+    /** 一轮收尾（成功、失败、被取消都算）：不再 live，卡片才可以被收起。 */
+    fun endTurn() { runningRoundId = null }
 
     fun agentSay(body: String, delayMs: Long = 800, source: SourceTag? = null) {
         scope.launch {
             typing = true; scroll()
             delay(delayMs)
             typing = false
-            messages += ChatMsg.Text(true, body, source); scroll()
+            feed.add(ChatMsg.Text(true, body, source)); scroll()
         }
     }
 
@@ -193,19 +326,21 @@ fun ChatScreen(
             is AskStage.Interpreting -> { typing = true; scroll() }
             is AskStage.Answered -> {
                 typing = false
+                endTurn()
                 val a = s.answer
                 val text = buildString {
                     append(a.headline)
                     if (a.detail.isNotEmpty()) append("\n").append(a.detail.joinToString("\n"))
                     a.footnote?.let { append("\n—— ").append(it) }
                 }
-                messages += ChatMsg.Text(true, text); scroll()
+                feed.add(ChatMsg.Text(true, text)); scroll()
             }
             is AskStage.Unavailable -> {
                 typing = false
+                endTurn()
                 // s.reason 已是白名单文案（见 UserFacingErrors），不透传服务端原文。
                 // 但光说「换个问法」没用——用户不知道换成哪种，所以附一个必然能成的例子。
-                messages += ChatMsg.Text(true, askUnavailableReply(s.reason))
+                feed.add(ChatMsg.Text(true, askUnavailableReply(s.reason)))
                 scroll()
             }
             else -> {}
@@ -221,7 +356,7 @@ fun ChatScreen(
             val note = raw.replace(Regex("[，,]?\\s*\\d+(?:\\.\\d+)?\\s*"), "")
                 .replace(Regex("花了|花|了"), "").trim().ifEmpty { "未备注" }
             // 金额取原文那份（amountText），**不用模型的**——这条路上模型没给出可信金额
-            messages += ChatMsg.EntryCard(ParsedEntry(cat, note, amountText), raw, source)
+            feed.add(ChatMsg.EntryCard(ParsedEntry(cat, note, amountText), raw, source))
             scroll()
         }
     }
@@ -229,8 +364,13 @@ fun ChatScreen(
     /**
      * 对话里「确认入账」：交给 [AddEntryViewModel.saveQuickEntry] 真写库。
      * 成功、失败各说各话——**没写进去却说「记好了」是最伤信任的一种 bug**。
+     *
+     * [cardKey] 非空时把这张卡记进「已提交」集合（saveable）。原来那个 `done`
+     * 是 EntryBubble 里的 `remember`：卡片一旦收起就离开组合，remember 被丢掉，
+     * 再展开就变回可点的「确认入账」——**同一笔能记第二遍**。
      */
-    fun confirmEntry(card: ChatMsg.EntryCard) {
+    fun confirmEntry(card: ChatMsg.EntryCard, cardKey: String?) {
+        if (cardKey != null) markConfirmed(cardKey)
         addEntryViewModel.saveQuickEntry(
             amountText = card.entry.amountText,
             categoryName = card.entry.category,
@@ -270,12 +410,13 @@ fun ChatScreen(
     }
 
     fun userSay(text: String) {
-        messages += ChatMsg.Text(false, text); scroll()
+        feed.add(ChatMsg.Text(false, text)); scroll()
         val intent = classifyChatInput(text)
 
         // 查账：直接进本地 SQL 链路 —— **计算交给账本，模型不算数**。
         // 答不出来时 AskViewModel 会再让模型接一句不涉及金额的话。
         if (intent is ChatIntent.Ask) {
+            claimTurn()
             viewModel.onQuestionChange(intent.question)
             viewModel.onAsk()
             return
@@ -284,9 +425,10 @@ fun ChatScreen(
         // 其余交给本机模型：认出是账就出卡片，否则正常接话。
         // 模型不可用时退回原来的规则判断与话术，聊天页不能哑掉。
         scope.launch {
+            claimTurn()
             typing = true; scroll()
             retryText = ""
-            liveReply = ""
+            draft.text = ""
             modelWait = true
             waitStart = SystemClock.elapsedRealtime()
 
@@ -296,17 +438,21 @@ fun ChatScreen(
             if (intent is ChatIntent.Record) {
                 val outcome = runCatching { azhang.parseEntry(text) }.getOrNull()
                 if (outcome != null && outcome.entries.isNotEmpty()) {
-                    modelWait = false; typing = false
+                    modelWait = false; typing = false; endTurn()
                     val e = outcome.entries.first()
-                    messages += ChatMsg.EntryCard(
-                        ParsedEntry(e.categoryName, e.note.ifBlank { text }, e.amountText),
-                        text,
-                        source = outcome.source,
+                    feed.add(
+                        ChatMsg.EntryCard(
+                            ParsedEntry(e.categoryName, e.note.ifBlank { text }, e.amountText),
+                            text,
+                            source = outcome.source,
+                        ),
                     )
                     if (outcome.entries.size > 1) {
-                        messages += ChatMsg.Text(
-                            true,
-                            "识别到 ${outcome.entries.size} 笔，先记第一笔，其余的再补。",
+                        feed.add(
+                            ChatMsg.Text(
+                                true,
+                                "识别到 ${outcome.entries.size} 笔，先记第一笔，其余的再补。",
+                            ),
                         )
                     }
                     scroll()
@@ -331,8 +477,8 @@ fun ChatScreen(
                             thinking.append(ev.delta, SystemClock.elapsedRealtime())
 
                         is AzhangStream.Text -> {
-                            val first = liveReply.isEmpty()
-                            liveReply += ev.delta
+                            val first = draft.text.isEmpty()
+                            draft.text += ev.delta
                             if (first) scroll()
                         }
 
@@ -345,8 +491,9 @@ fun ChatScreen(
             modelWait = false
             typing = false
             thinking.finish(SystemClock.elapsedRealtime())
-            val draft = liveReply
-            liveReply = ""
+            // 局部名 partial：这里的 `draft` 是那个稳定容器，别再占用同名
+            val partial = draft.text
+            draft.text = ""
             // finish 在闭包里被赋值过，Kotlin 不允许对它做智能转换 —— 拷成本地不可变引用
             val result = finish
             when {
@@ -354,43 +501,49 @@ fun ChatScreen(
                 !ok -> {
                     retryText = text
                     val reason = if (azhang.isReady) CHAT_GEN_TIMEOUT_TEXT else CHAT_PREPARING_TIMEOUT_TEXT
-                    messages += ChatMsg.Text(
-                        true,
-                        if (draft.isEmpty()) reason else "$draft\n\n—— $reason",
-                        source = SourceTag.rulesNotReady(reason, SourceTag.CODE_BAD_OUTPUT),
+                    feed.add(
+                        ChatMsg.Text(
+                            true,
+                            if (partial.isEmpty()) reason else "$partial\n\n—— $reason",
+                            source = SourceTag.rulesNotReady(reason, SourceTag.CODE_BAD_OUTPUT),
+                        ),
                     )
                 }
 
                 result is AzhangTurn.Entry -> {
                     val e = result.entries.first()
-                    messages += ChatMsg.EntryCard(
-                        ParsedEntry(e.categoryName, e.note.ifBlank { text }, e.amountText),
-                        text,
-                        source = result.source,
+                    feed.add(
+                        ChatMsg.EntryCard(
+                            ParsedEntry(e.categoryName, e.note.ifBlank { text }, e.amountText),
+                            text,
+                            source = result.source,
+                        ),
                     )
                     if (result.entries.size > 1) {
-                        messages += ChatMsg.Text(true, "识别到 ${result.entries.size} 笔，先记第一笔，其余的再补。")
+                        feed.add(ChatMsg.Text(true, "识别到 ${result.entries.size} 笔，先记第一笔，其余的再补。"))
                     }
                 }
 
                 result is AzhangTurn.Reply -> {
                     // 模型那句话照常显示；它没给数组时，保底规则补出来的卡片跟在后面
                     // （见 withRulesEntryFallback）——这样「账一定记得上」不依赖模型守约。
-                    messages += ChatMsg.Text(true, result.body)
+                    feed.add(ChatMsg.Text(true, result.body))
                     if (result.entries.isNotEmpty()) {
                         val e = result.entries.first()
-                        messages += ChatMsg.EntryCard(
-                            entry = ParsedEntry(
-                                category = e.categoryName,
-                                note = e.note.ifBlank { text },
-                                amountText = e.amountText,
+                        feed.add(
+                            ChatMsg.EntryCard(
+                                entry = ParsedEntry(
+                                    category = e.categoryName,
+                                    note = e.note.ifBlank { text },
+                                    amountText = e.amountText,
+                                ),
+                                raw = text,
+                                // 保底补出来的卡来源是规则（带原因与代码），卡上要标出来
+                                source = result.entriesSource ?: SourceTag.Model,
                             ),
-                            raw = text,
-                            // 保底补出来的卡来源是规则（带原因与代码），卡上要标出来
-                            source = result.entriesSource ?: SourceTag.Model,
                         )
                         if (result.entries.size > 1) {
-                            messages += ChatMsg.Text(true, "识别到 ${result.entries.size} 笔，先记第一笔，其余的再补。")
+                            feed.add(ChatMsg.Text(true, "识别到 ${result.entries.size} 笔，先记第一笔，其余的再补。"))
                         }
                     }
                 }
@@ -460,46 +613,63 @@ fun ChatScreen(
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(p.line2))
 
-        /* 消息流 */
+        /* 消息流：一轮一张卡，点标题栏展开/收起 */
+        // 折叠状态与「已提交」集合在页面层各解一次。它们是**点一下/按一次才变**的量，
+        // 不是每块 token 都变的量——在这里读不会造成生成期的抖动。
+        val overrides = decodeExpanded(overrideRaw)
+        val confirmed = decodeConfirmed(confirmedRaw)
+        // running 只看 typing，**不能把 thinkingOn 并进来**：思考区结束后仍要留着那一行
+        // 「查看思考过程」，thinkingOn 从此一直是 true。并进 running 的话最后一轮
+        // 永远强制展开，用户再也收不起刚看完的那轮。
+        val running = typing
+        val liveRoundId = if (running) runningRoundId ?: feed.rounds.lastOrNull()?.id else null
+        val thinkingRoundId = if (thinkingOn) turnRoundId else null
+        // 等待气泡显示哪个阶段：本机模型在跑就用引擎阶段，问账链路用调度阶段。
+        // 口径与改造前那三条 when 分支完全一致，只是从「列表末尾独立 item」
+        // 搬进卡片内部——搬进来才会跟着轮次收起/展开，也不会挂错轮次。
+        val waitPhase = when {
+            modelWait -> enginePhase
+            askState.stage is AskStage.Interpreting -> UiPhase.DISPATCH
+            else -> null
+        }
+        val waitSince = if (modelWait) waitStart else askState.waitStart
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            items(messages) { msg ->
-                when (msg) {
-                    is ChatMsg.Text -> TextBubble(msg.fromAgent, msg.body, msg.source, onOpenSettings)
-                    is ChatMsg.EntryCard -> EntryBubble(
-                        entry = msg.entry,
-                        source = msg.source,
-                        onConfirm = { confirmEntry(msg) },
-                        onEdit = {
-                            // 「修改」= 把原话回填输入框，让用户改完重发。
-                            input = msg.raw
-                            scroll()
-                        },
-                    )
-                }
+            // key 用轮次 id：新消息追加时前面的 key 不变，折叠态与动画都不会串位
+            itemsIndexed(feed.rounds, key = { _, round -> round.id }) { index, round ->
+                val roundIsLive = round.id == liveRoundId
+                val expanded = resolveRoundExpanded(
+                    index = index,
+                    total = feed.rounds.size,
+                    roundId = round.id,
+                    overrides = overrides,
+                    live = roundIsLive,
+                )
+                RoundCard(
+                    round = round,
+                    expanded = expanded,
+                    live = roundIsLive,
+                    draft = if (roundIsLive) draft else null,
+                    thinking = if (round.id == thinkingRoundId) thinking else null,
+                    waitPhase = if (roundIsLive) waitPhase else null,
+                    waitStart = if (roundIsLive) waitSince else null,
+                    confirmed = confirmed,
+                    onToggle = { toggleRound(round.id, expanded) },
+                    onOpenSettings = onOpenSettings,
+                    onConfirmEntry = { card, index -> confirmEntry(card, entryCardKey(index)) },
+                    onEditEntry = { raw ->
+                        // 「修改」= 把原话回填输入框，让用户改完重发。
+                        input = raw
+                        scroll()
+                    },
+                )
             }
-            // 思考过程：默认收起一行摘要，展开是局部滚动区。
-            // 进来的只有 [ThinkingUiState] 这一个稳定对象 —— 内容在组件内部读，
-            // 所以模型每吐一块只重组这一项，气泡/输入框/chips 都不跟着重排。
-            if (thinkingOn) item { ThinkingSection(thinking) }
-
-            // 流式草稿：生成中的正文逐字上屏，不等终态一次出
-            if (liveReply.isNotEmpty()) item { TextBubble(true, liveReply) }
-            if (typing) item {
-                when {
-                    // 等本机模型 → 阶段 + 已用时（不是三个点干等）
-                    modelWait -> WaitBubble(enginePhase, waitStart)
-
-                    // 问账链路 → 已经交给 AI 服务判定，也给阶段 + 已用时
-                    askState.stage is AskStage.Interpreting -> WaitBubble(UiPhase.DISPATCH, askState.waitStart)
-
-                    else -> TypingBubble()
-                }
-            }
+            // 一句都还没上屏（首次的开场白还在 delay 里）时没有卡片可挂，单独给一项
+            if (running && feed.rounds.isEmpty()) item { TypingBubble() }
         }
 
         /* 建议问题（失败后第一个是「重试」，重发上一条原话） */
@@ -563,6 +733,143 @@ fun ChatScreen(
     }
 }
 
+/* ---------------- 轮次卡片 ---------------- */
+
+/**
+ * 一轮对话 = 一张卡。标题恒为一行，点开是完整的一轮（用户那句 + 模型的全部产出），
+ * 再点收起。
+ *
+ * ## 三条口径
+ *
+ * 1. **收起时 body 整块离开组合**，不是 `alpha = 0f` 藏起来。
+ *    那些卡片里有 `remember` 的状态——EntryBubble 的 `done`。留在组合里那个 `done`
+ *    就还在，收起再展开仍然显示「已提交」；但「留在组合里」意味着 LazyColumn
+ *    要为它测量、八轮对话占的内存和布局一分都不省，那这次折叠就白做了。
+ *    所以 body 真的拆掉，代价是 `done` 没了——那个状态因此搬到页面层的 saveable
+ *    集合里（[entryCardKey]），见 [ChatScreen] 的 `confirmedRaw`。
+ *
+ * 2. **展开状态是算出来的，不是存进来的**（[resolveRoundExpanded]）。
+ *    这样「新轮次默认展开三轮」和「用户点过的那轮听用户的」不会互相覆盖，
+ *    也不会随着新消息在开合之间来回跳。
+ *
+ * 3. **live 的那一张才读草稿**。[draft] 是稳定对象，非 live 的卡片传的是 null，
+ *    连读都不读——没有订阅就没有重组。生成期只有「一张卡片 + 思考区」重画。
+ */
+@Composable
+private fun RoundCard(
+    round: ChatRound,
+    expanded: Boolean,
+    live: Boolean,
+    draft: DraftBuffer?,
+    thinking: ThinkingUiState?,
+    waitPhase: UiPhase?,
+    waitStart: Long?,
+    confirmed: Set<String>,
+    onToggle: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onConfirmEntry: (ChatMsg.EntryCard, Int) -> Unit,
+    onEditEntry: (String) -> Unit,
+) {
+    val p = Art.colors
+    val shape = RoundedCornerShape(p.radiusL)
+    // 容器用 p.bg（= 页面底色）+ 发丝线边框，而不是 p.card：
+    // 卡内 assistant 气泡本身就是 p.card，两层同色就没有层次了。
+    // Zen/Editorial 这两套的 card 与 surface 差不到 5%，靠色块分不出轮次边界，
+    // 边框才是这里的分隔手段（与主题里 stageAsCard=false 的「发丝线通栏」口径一致）。
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(p.bg)
+            .border(1.dp, p.line, shape),
+    ) {
+        RoundHeader(round, expanded, live, onToggle)
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(),
+            exit = shrinkVertically(),
+        ) {
+            // 轮次内部不再要项间距——气泡之间靠自己的外边距，这里用 Column 排
+            Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                round.items.forEachIndexed { offset, msg ->
+                    when (msg) {
+                        is ChatMsg.Text -> TextBubble(
+                            fromAgent = !msg.isUserTurn,
+                            body = msg.body,
+                            source = msg.source,
+                            onOpenSettings = onOpenSettings,
+                        )
+                        is ChatMsg.EntryCard -> EntryBubble(
+                            entry = msg.entry,
+                            source = msg.source,
+                            done = entryCardKey(round.firstItemIndex + offset) in confirmed,
+                            onConfirm = { onConfirmEntry(msg, round.firstItemIndex + offset) },
+                            onEdit = { onEditEntry(msg.raw) },
+                        )
+                    }
+                }
+                // 思考过程：默认收起一行摘要，展开是局部滚动区。
+                // 只有被本轮认领的那张卡传得进对象（其他轮次传 null，压根不渲染），
+                // 所以上一轮那行「查看思考过程」不会被算到新一轮头上。
+                if (thinking != null) ThinkingSection(thinking)
+                // 流式草稿：生成中的正文逐字上屏，不等终态一次出。
+                // 读 draft.text 是本轮唯一的每-token 订阅点。
+                val liveDraft = draft?.text
+                if (!liveDraft.isNullOrEmpty()) TextBubble(true, liveDraft)
+                // 等待气泡：阶段 + 已用时（不是三个点干等）。放在草稿之后，
+                // 因为「还在等什么」比「已经出了什么」更该贴在最新一行。
+                if (waitPhase != null) WaitBubble(waitPhase, waitStart)
+            }
+        }
+    }
+}
+
+/**
+ * 标题栏：一行用户消息 + 箭头。整行可点。
+ *
+ * 收起时的提示文案（`2 条回应 · 生成中`）用 [roundCollapsedHint]，
+ * 展开时不显示——展开着还写「几条回应」是废话。
+ */
+@Composable
+private fun RoundHeader(
+    round: ChatRound,
+    expanded: Boolean,
+    live: Boolean,
+    onToggle: () -> Unit,
+) {
+    val p = Art.colors
+    val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "roundArrow")
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            roundTitle(round.prompt, round.items),
+            modifier = Modifier.weight(1f),
+            style = TextStyle(fontSize = 13.5.sp, lineHeight = 20.sp, fontFamily = Art.type.body),
+            color = p.ink,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        val hint = roundCollapsedHint(round.replyCount, live)
+        if (!expanded && hint.isNotEmpty()) {
+            Spacer(Modifier.width(8.dp))
+            Text(hint, style = TextStyle(fontSize = 11.sp), color = p.ink3, maxLines = 1)
+        }
+        Spacer(Modifier.width(6.dp))
+        // 箭头用旋转的 ▾ 表示，和 ThinkingSection 同一套——不为两个方向引图标资源
+        Text(
+            "▾",
+            style = TextStyle(fontSize = 12.sp),
+            color = p.ink3,
+            modifier = Modifier.rotate(arrow),
+        )
+    }
+}
+
 /* ---------------- 气泡 ---------------- */
 
 @Composable
@@ -573,7 +880,7 @@ private fun TextBubble(
     onOpenSettings: () -> Unit = {},
 ) {
     val p = Art.colors
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromAgent) Arrangement.Start else Arrangement.End) {
+    Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = if (fromAgent) Arrangement.Start else Arrangement.End) {
         if (fromAgent) { SealBadge("账", size = 28.dp); Spacer(Modifier.width(10.dp)) }
         Column(Modifier.widthIn(max = 300.dp)) {
             Box(
@@ -615,17 +922,25 @@ private fun TextBubble(
     }
 }
 
+/**
+ * 待确认卡片。
+ *
+ * [done] 现在由外面给——原来这里是 `var done by remember { mutableStateOf(false) }`。
+ * 折叠之后卡片会真的离开组合，remember 被丢掉，**「已提交」会退回可点的「确认入账」**，
+ * 于是同一笔能记第二遍。所以那份状态搬到页面层的 saveable 集合里（见 [entryCardKey]）。
+ * 这不是洁癖，是这次改动直接引入的风险：不搬，折叠功能本身就是个重复记账的入口。
+ */
 @Composable
 private fun EntryBubble(
     entry: ParsedEntry,
+    done: Boolean,
     onConfirm: () -> Unit,
     onEdit: () -> Unit,
     source: SourceTag = SourceTag.Model,
 ) {
     val p = Art.colors
     // 按过任一按钮就锁住：既不能再点「确认入账」，也不能重复点「修改」。
-    var done by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+    Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.Start) {
         SealBadge("账", size = 28.dp)
         Spacer(Modifier.width(10.dp))
         Column(
@@ -669,7 +984,6 @@ private fun EntryBubble(
                         .weight(1f)
                         .background(when { done -> p.pos; p.dark -> p.accent; else -> p.ink })
                         .clickable(enabled = !done) {
-                            done = true
                             onConfirm()
                         }
                         .padding(vertical = 13.dp),
@@ -681,7 +995,6 @@ private fun EntryBubble(
                 }
                 Box(
                     Modifier.weight(1f).clickable(enabled = !done) {
-                        done = true
                         onEdit()
                     }.padding(vertical = 13.dp),
                     contentAlignment = Alignment.Center,
