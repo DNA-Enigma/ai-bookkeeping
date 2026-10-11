@@ -30,7 +30,9 @@ export ANDROID_SDK_ROOT="$TOOLCHAIN_ROOT/sdk"
 APK="$TOOLCHAIN_ROOT/sdk"   # 仅为下面 aapt2 路径可读
 
 REPO="DNA-Enigma/ai-bookkeeping"
-APK_PATH="app/build/outputs/apk/release/app-release.apk"
+# 发布哪一档：默认 lite（比赛提交档，<1G）。要发完整版 FLAVOR=full tools/release-apk.sh …
+FLAVOR="${FLAVOR:-lite}"
+APK_PATH="app/build/outputs/apk/${FLAVOR}/release/app-${FLAVOR}-release.apk"
 NOTES=""
 
 # --- 参数 ---
@@ -47,8 +49,18 @@ command -v gh >/dev/null || { echo "需要 gh CLI" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh 未登录：先跑 gh auth login" >&2; exit 1; }
 
 echo "==> 构建（release = 必须用 keystore 签名的包）"
-bash tools/build.sh :app:assembleRelease --no-build-cache >/dev/null
+BUILD_START=$(date +%s)
+# flavor 首字母大写拼任务名：lite → :app:assembleLiteRelease
+TASK=":app:assemble${FLAVOR^}Release"
+bash tools/build.sh "$TASK" --no-build-cache >/dev/null
 [[ -f "$APK_PATH" ]] || { echo "APK 不存在: $APK_PATH" >&2; exit 1; }
+# 产物新鲜度断言：mtime 早于本次构建开始 = Gradle 没真正重建、拿的是陈旧产物。
+# 「文件存在≠可发布」——静默发旧包比当场报错难查得多（2026-10-11 批次2实测踩过：
+# 加 flavor 后产物挪了目录，旧路径的陈旧包照样通过所有检查被发出去）。
+if [[ $(stat -c %Y "$APK_PATH") -lt $BUILD_START ]]; then
+  echo "产物陈旧（早于本次构建），拒绝发布: $APK_PATH" >&2
+  exit 1
+fi
 
 # 断言签名是 release key 而不是 debug key。keystore/ 没同步到的机器上，
 # signingConfig 会是 null、照样出一个**未签名**包——文件存在≠可发布。
