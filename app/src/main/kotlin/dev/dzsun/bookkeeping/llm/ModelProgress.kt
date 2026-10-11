@@ -17,6 +17,9 @@ enum class UiPhase {
     /** 把内置 GGUF 释放到应用目录 —— 唯一有确定分母的阶段。 */
     RELEASING,
 
+    /** 从网络下载 GGUF——有确定分母（Content-Length）+ 本次会话速度。 */
+    DOWNLOADING,
+
     /** 引擎初始化（还没开始读权重）。 */
     STARTING,
 
@@ -67,6 +70,7 @@ fun phaseOf(state: InferenceEngine.State): UiPhase = when (state) {
 /** 阶段名。 */
 fun phaseLabel(phase: UiPhase): String = when (phase) {
     UiPhase.RELEASING -> "释放内置模型"
+    UiPhase.DOWNLOADING -> "下载模型"
     UiPhase.STARTING -> "启动推理引擎"
     UiPhase.LOADING_WEIGHTS -> "加载模型权重"
     UiPhase.DECODING_PROMPT -> "解码系统提示"
@@ -83,6 +87,7 @@ fun phaseLabel(phase: UiPhase): String = when (phase) {
  */
 fun phaseHint(phase: UiPhase): String = when (phase) {
     UiPhase.RELEASING -> "首次约 26 秒，写入应用目录后不用再释放"
+    UiPhase.DOWNLOADING -> "约 1 GB，Wi-Fi 下几分钟；中断后重开会接着下，不用重头"
     UiPhase.STARTING -> "很快，几秒"
     UiPhase.LOADING_WEIGHTS -> "首次约 1~4 分钟（读 1 GB 文件），可先去别的页面"
     UiPhase.DECODING_PROMPT -> "首次较久，实测约 1~5 分钟"
@@ -136,6 +141,55 @@ fun releaseLine(bytesDone: Long, bytesTotal: Long, elapsedMs: Long?): String {
 }
 
 /**
+ * 下载速度的**纯函数核**：本次会话字节数 ÷ 本次会话用时，取 3 秒窗口的平滑值由调用方算，
+ * 这里只负责把字节/秒翻成用户话——**没有分母（会话字节 <= 0 或用时为空）就不出速度**，
+ * 宁可少一句也不造「0 MB/s」。
+ */
+fun speedLine(bytesThisSession: Long, sessionElapsedMs: Long?): String? {
+    if (bytesThisSession <= 0L) return null
+    val sec = (sessionElapsedMs ?: return null).coerceAtLeast(0L) / 1000.0
+    if (sec <= 0.0) return null
+    val mbps = (bytesThisSession / 1024.0 / 1024.0) / sec
+    return if (mbps >= 1.0) String.format(java.util.Locale.ROOT, "%.1f MB/s", mbps)
+    else String.format(java.util.Locale.ROOT, "%.0f KB/s", mbps * 1024)
+}
+
+/**
+ * 剩余时间：**还差多少字节 ÷ 本次会话速度**（不是 ÷ 平均速度——续传后平均会把
+ * 之前会话的时间也算进去，剩余时间会被严重低估）。除不尽（速度为 0）返回 null 不显示。
+ */
+fun etaLine(bytesRemaining: Long, bytesPerSecond: Double): String? {
+    if (bytesRemaining <= 0L || bytesPerSecond <= 0.0) return null
+    val sec = (bytesRemaining / bytesPerSecond).toLong()
+    return when {
+        sec < 90 -> "约 ${sec.coerceAtLeast(1)} 秒"
+        sec < 3600 -> "约 ${sec / 60} 分钟"
+        else -> "约 ${sec / 3600} 小时 ${sec % 3600 / 60} 分"
+    }
+}
+
+/**
+ * 下载进度行：`已下载 X / 共 Y MB · Z% · 速度 · 剩余`。
+ * 与 [releaseLine] 同构但口径不同：速度只算**本次会话**（[bytesStart] 是续传起点），
+ * 剩余时间从会话速度推——两处都是刻意不造的数：速度/剩余缺分母就不出。
+ */
+fun downloadLine(
+    bytesDone: Long,
+    bytesTotal: Long,
+    bytesStart: Long,
+    sessionElapsedMs: Long?,
+): String {
+    val head = "已下载 ${bytesDone.coerceAtLeast(0L) / 1024 / 1024} / 共 ${bytesTotal.coerceAtLeast(0L) / 1024 / 1024} MB"
+    val pct = releasePercent(bytesDone, bytesTotal)?.let { " · $it%" }.orEmpty()
+    val speed = speedLine(bytesDone - bytesStart, sessionElapsedMs)?.let { " · $it" }.orEmpty()
+    val sessionBps = if (sessionElapsedMs != null && sessionElapsedMs > 0 && bytesDone > bytesStart) {
+        (bytesDone - bytesStart) * 1000.0 / sessionElapsedMs
+    } else 0.0
+    val eta = etaLine(bytesTotal - bytesDone, sessionBps)?.let { " · $it" }.orEmpty()
+    return head + pct + speed + eta
+}
+
+/**
  * 失败文案的两段：**具体原因 + 建议动作**（「重试」是按钮，由界面渲染，不进文案）。
  *
  * [reason] 已经是「是什么」（`issueMessage` / `UserFacingErrors` 产出），
@@ -147,6 +201,7 @@ fun failureText(reason: String, suggestion: String? = null): List<String> =
 /** 首次加载类阶段（这几档只在真的加载时出现，给「可以先走开」的提示是诚实的）。 */
 val UiPhase.isFirstLoadWait: Boolean
     get() = this == UiPhase.RELEASING ||
+        this == UiPhase.DOWNLOADING ||
         this == UiPhase.STARTING ||
         this == UiPhase.LOADING_WEIGHTS ||
         this == UiPhase.DECODING_PROMPT

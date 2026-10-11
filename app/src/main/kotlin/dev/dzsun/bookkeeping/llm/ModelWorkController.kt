@@ -37,10 +37,17 @@ data class ModelWorkProgress(
     val startedAtMs: Long? = null,
     val bytesDone: Long = -1L,
     val bytesTotal: Long = -1L,
+    /**
+     * 下载专属：**本次会话**的起点字节（断点续传时 = 已有 .part 的大小）。
+     * 速度 = (bytesDone - bytesStart) / 会话用时——不除以总用时，
+     * 否则续传后平均速度被之前会话稀释，剩余时间严重低估。
+     * 释放路径不设置它（起点恒 0，无歧义）。
+     */
+    val bytesStart: Long = 0L,
 )
 
 /** 后台长任务的种类。[NONE] = 当前没有需要守护的等待。 */
-enum class ModelWorkKind { RELEASE, INIT, GENERATE, NONE }
+enum class ModelWorkKind { RELEASE, DOWNLOAD, INIT, GENERATE, NONE }
 
 /**
  * 一次长任务的**收场**：成功、失败（带真实原因）、或被顶替/取消。
@@ -245,6 +252,40 @@ class ModelWorkController @Inject constructor(
         conclude(ModelWorkResult(ModelWorkKind.RELEASE, ok, message))
     }
 
+    // —— 下载（与释放同一口子，见类注释「下载 = 另一种进度源」） ——
+
+    /**
+     * 网络下载开始。[bytesStart] 是续传起点（.part 已有字节），总时长含之前会话，
+     * 但速度只按本次会话算（见 [ModelWorkProgress.bytesStart]）。
+     */
+    fun reportDownloadStart(bytesStart: Long, bytesTotal: Long) {
+        _progress.value = ModelWorkProgress(
+            kind = ModelWorkKind.DOWNLOAD,
+            phase = UiPhase.DOWNLOADING,
+            startedAtMs = SystemClock.elapsedRealtime(),
+            bytesDone = bytesStart,
+            bytesTotal = bytesTotal,
+            bytesStart = bytesStart,
+        )
+        notifyGuard()
+    }
+
+    /** 下载字节进度——与 [reportReleaseBytes] 同一条去抖路径。 */
+    fun reportDownloadBytes(bytesDone: Long) {
+        val current = _progress.value
+        if (current.kind != ModelWorkKind.DOWNLOAD) return
+        _progress.value = current.copy(bytesDone = bytesDone)
+    }
+
+    /**
+     * 下载收场。校验不匹配自动重下时**不要调它**——那是同一次等待的继续，
+     * 调了通知就闪「失败」。真正终态（成功 / 用户取消 / 二次校验仍失败）才调。
+     */
+    fun reportDownloadDone(ok: Boolean, message: String) {
+        if (_progress.value.kind != ModelWorkKind.DOWNLOAD) return
+        conclude(ModelWorkResult(ModelWorkKind.DOWNLOAD, ok, message))
+    }
+
     /**
      * 生成收场的**内容回报口**——调用方（面板/对话页/问账页）拿到最终正文或
      * 失败原因后调它，通知栏的「回答已生成」才有真实内容。
@@ -382,6 +423,7 @@ internal fun progressText(progress: ModelWorkProgress, nowMs: Long?): Pair<Strin
     if (progress.kind == ModelWorkKind.NONE || progress.phase == UiPhase.IDLE) return null
     val title = when (progress.kind) {
         ModelWorkKind.RELEASE -> phaseLabel(UiPhase.RELEASING)
+        ModelWorkKind.DOWNLOAD -> phaseLabel(UiPhase.DOWNLOADING)
         ModelWorkKind.INIT -> "本机模型准备中"
         ModelWorkKind.GENERATE -> "本机模型思考中"
         ModelWorkKind.NONE -> return null
@@ -390,7 +432,11 @@ internal fun progressText(progress: ModelWorkProgress, nowMs: Long?): Pair<Strin
         ?.let { start -> nowMs?.let { (it - start).coerceAtLeast(0L) } }
     // 与页面（ModelProgressView）同口径：releasePercent 为 null = 没有真分母，
     // 不画进度条也不造「0 / 共 0 MB」，退回「阶段名 + 已用时」。
-    val body = if (progress.kind == ModelWorkKind.RELEASE &&
+    val body = if (progress.kind == ModelWorkKind.DOWNLOAD &&
+        releasePercent(progress.bytesDone, progress.bytesTotal) != null
+    ) {
+        downloadLine(progress.bytesDone, progress.bytesTotal, progress.bytesStart, elapsed)
+    } else if (progress.kind == ModelWorkKind.RELEASE &&
         releasePercent(progress.bytesDone, progress.bytesTotal) != null
     ) {
         releaseLine(progress.bytesDone, progress.bytesTotal, elapsed)
@@ -409,6 +455,7 @@ internal fun resultText(result: ModelWorkResult): Pair<String, String>? {
         ModelWorkKind.GENERATE -> if (result.ok) "回答已生成" else "生成没有完成"
         ModelWorkKind.INIT -> if (result.ok) "模型已就绪" else "模型加载失败"
         ModelWorkKind.RELEASE -> if (result.ok) "模型资产释放完成" else "模型资产释放失败"
+        ModelWorkKind.DOWNLOAD -> if (result.ok) "模型下载完成" else "模型下载未完成"
         ModelWorkKind.NONE -> return null
     }
     return title to result.message.take(RESULT_SNIPPET_MAX)

@@ -51,6 +51,10 @@ import kotlinx.coroutines.launch
  *    （5 秒硬要求），**然后**才允许停。
  *  - onTaskRemoved 不停服务：用户划掉 App 壳不等于取消生成——引擎是进程级
  *    单例，任务还在跑，通知栏是它唯一的可见出口。
+ *  - **START_STICKY**：下载是网络长任务，进程被杀后服务重建（progress 归零）
+ *    而下载器自身靠 .part 文件续传——重建后 [ModelDownloadManager] 在进程
+ *    onCreate 里恢复等待时，通知跟着重新挂上。释放/加载是进程内操作，
+ *    进程死了它们也没了，STICKY 重建对它们只是多余一次启动，无副作用。
  */
 @AndroidEntryPoint
 class ModelWorkService : Service() {
@@ -92,7 +96,9 @@ class ModelWorkService : Service() {
                     }
                 }
         }
-        return START_NOT_STICKY
+        // STICKY：下载这类网络长任务，进程被杀后服务重建、下载器靠 .part 续传接上
+        // （见类注释「生命周期口径」）。释放/加载是进程内操作，重建对它们无副作用。
+        return START_STICKY
     }
 
     /**
@@ -140,10 +146,10 @@ class ModelWorkService : Service() {
             .setOnlyAlertOnce(true)
             .setSilent(true)
 
-        if (progress.kind == ModelWorkKind.RELEASE) {
+        if (progress.kind == ModelWorkKind.RELEASE || progress.kind == ModelWorkKind.DOWNLOAD) {
             val percent = releasePercent(progress.bytesDone, progress.bytesTotal)
             if (percent != null) {
-                // 确定性进度条：分母来自安装器 expectedBytes()，没有分母绝不画条
+                // 确定性进度条：分母来自安装器 expectedBytes() / HTTP Content-Length，没有分母绝不画条
                 builder.setProgress(100, percent, false)
             }
         }

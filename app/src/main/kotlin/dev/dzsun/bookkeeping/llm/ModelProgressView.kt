@@ -127,8 +127,9 @@ fun ModelProgressLine(
  * 完整进度块（设置页 / 问账页 / 记一笔用）：
  * 有分母给真进度条，没分母给「阶段 + 已用时 + 预期」，失败给「原因 + 动作 + 重试」。
  *
- * @param bytesDone / [bytesTotal] 仅 [UiPhase.RELEASING] 有意义；[bytesTotal] <= 0 时**不画条**
- *   （没有分母就不许画百分比——内置资产缺失时正是这种情况）。
+ * @param bytesDone / [bytesTotal] 在 [UiPhase.RELEASING] 与 [UiPhase.DOWNLOADING] 有意义；
+ *   [bytesTotal] <= 0 时**不画条**（没有分母就不许画百分比——内置资产缺失时正是这种情况）。
+ * @param bytesStart 下载专属：本次会话起点（续传时 > 0），速度只按它算；释放路径忽略。
  * @param streamingText 生成中的流式正文，非空就边生成边显示。
  * @param reason 失败的具体原因；非空则渲染失败块，忽略其余参数。
  * @param suggestion 建议动作，可空（有些原因本身已含下一步）。
@@ -141,6 +142,7 @@ fun ModelProgressView(
     modifier: Modifier = Modifier,
     bytesDone: Long = -1L,
     bytesTotal: Long = -1L,
+    bytesStart: Long = 0L,
     streamingText: String? = null,
     reason: String? = null,
     suggestion: String? = null,
@@ -163,8 +165,25 @@ fun ModelProgressView(
     val text = streamingText.orEmpty()
 
     Column(modifier = modifier) {
-        val percent = if (phase == UiPhase.RELEASING) releasePercent(bytesDone, bytesTotal) else null
-        if (percent != null) {
+        val percent = if (phase == UiPhase.RELEASING || phase == UiPhase.DOWNLOADING) {
+            releasePercent(bytesDone, bytesTotal)
+        } else null
+        if (percent != null && phase == UiPhase.DOWNLOADING) {
+            LinearProgressIndicator(
+                progress = { percent / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(999.dp)),
+                color = color,
+                trackColor = color.copy(alpha = 0.18f),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                downloadLine(bytesDone, bytesTotal, bytesStart, startedAtMs?.let { elapsed }),
+                style = style,
+                color = color,
+            )
+        } else if (percent != null) {
             LinearProgressIndicator(
                 progress = { percent / 100f },
                 modifier = Modifier

@@ -37,6 +37,8 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.dzsun.bookkeeping.core.designsystem.Art
+import dev.dzsun.bookkeeping.llm.DownloadUiState
+import dev.dzsun.bookkeeping.llm.ModelDownloadManager
 import dev.dzsun.bookkeeping.llm.ModelInstaller
 import dev.dzsun.bookkeeping.llm.ModelProgressView
 import dev.dzsun.bookkeeping.llm.ReadyResult
@@ -109,6 +111,8 @@ class OnDeviceModelViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     /** 端侧模型的唯一属主：加载、生成、卸载都走它，这里不再自建引擎。 */
     private val session: SparkSession,
+    /** 网络下载管理器：lite 版首次用模型时从这里拉文件。 */
+    private val downloadManager: ModelDownloadManager,
 ) : ViewModel() {
 
     /**
@@ -157,6 +161,18 @@ class OnDeviceModelViewModel @Inject constructor(
     /** 设备上当前能找到的模型文件；释放内置模型后刷新，UI 用它渲染状态行。 */
     private val _modelFile = MutableStateFlow(findModel())
     val modelFile: StateFlow<File?> = _modelFile.asStateFlow()
+
+    /** 下载状态（Idle/Running/Ready/Failed）——下载卡片的唯一数据源。 */
+    val downloadState: StateFlow<DownloadUiState> = downloadManager.uiState
+
+    /** 点「下载模型」：发起/续传下载。进度与收场由管理器推 [downloadState]。 */
+    fun startDownload() = downloadManager.start()
+
+    /** 点「暂停」：.part 保留，下次接着下。 */
+    fun cancelDownload() = downloadManager.cancel()
+
+    /** 失败卡片上的「知道了」：清失败态回 Idle。 */
+    fun dismissDownloadFailure() = downloadManager.dismissFailure()
 
     init {
         viewModelScope.launch {
@@ -381,9 +397,20 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
     val waitStartMs = rememberWaitStart(explicitStart, waiting)
 
     val model by viewModel.modelFile.collectAsStateWithLifecycle()
+    val download by viewModel.downloadState.collectAsStateWithLifecycle()
+
+    // lite 版主路径：设备上没有模型 → 先显示下载卡片；下载完自动变「可以用了」
+    DownloadCard(
+        download = download,
+        hasModelFile = model != null,
+        onStart = viewModel::startDownload,
+        onCancel = viewModel::cancelDownload,
+        onDismiss = viewModel::dismissDownloadFailure,
+    )
+
     val modelLine = when {
         model != null -> "模型：${model!!.name}（${model!!.length() / 1024 / 1024} MB）"
-        else -> "模型：内置 · 点「加载模型」会自动释放到应用目录（首次约 1 GB）"
+        else -> "模型：未就绪 · 下载或点「加载模型」释放内置资产"
     }
     Text(modelLine, style = TextStyle(fontSize = 12.sp, fontFamily = FontFamily.Monospace), color = p.ink3)
     Spacer(Modifier.height(10.dp))
@@ -504,6 +531,95 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
 @Composable
 private fun StatusText(text: String, color: androidx.compose.ui.graphics.Color) {
     Text(text, style = TextStyle(fontSize = 12.5.sp, lineHeight = 19.sp), color = color)
+}
+
+/**
+ * 下载卡片：lite 版首次用模型的入口。
+ *
+ * 状态机（[DownloadUiState]）→ 界面：
+ *  - Idle：一张「下载模型（约 1 GB）」的卡片，点它开始；设备上已有 .part 时
+ *    标明「继续下载」——那是上次断点，不是从头来；
+ *  - Running：真进度条（有分母）+ 已下载/总量/速度/剩余（与通知栏同源）；
+ *  - Ready：绿字「可以用了」，用户接着点「加载模型」；
+ *  - Failed：原因 + 重试入口（半截 .part 保留着，重试是续传不是重头）。
+ */
+@Composable
+private fun DownloadCard(
+    download: DownloadUiState,
+    hasModelFile: Boolean,
+    onStart: () -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val p = Art.colors
+    when (download) {
+        is DownloadUiState.Idle -> if (!hasModelFile) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(p.radiusL))
+                    .background(p.surface)
+                    .border(1.dp, p.line, RoundedCornerShape(p.radiusL))
+                    .clickable(onClick = onStart)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "下载模型（约 1 GB）",
+                    style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium),
+                    color = p.accent,
+                    modifier = Modifier.weight(1f),
+                )
+                Text("点此开始", style = TextStyle(fontSize = 12.sp), color = p.ink3)
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
+        is DownloadUiState.Running -> {
+            val waitStart = rememberWaitStart(download.startedAtMs, active = true)
+            ModelProgressView(
+                phase = UiPhase.DOWNLOADING,
+                startedAtMs = waitStart,
+                bytesDone = download.bytesDone,
+                bytesTotal = download.bytesTotal,
+                bytesStart = download.sessionBytesStart,
+                color = p.accent,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "下载中 · 可切后台，通知栏继续 · 点此暂停",
+                style = TextStyle(fontSize = 11.5.sp),
+                color = p.ink3,
+                modifier = Modifier.clickable(onClick = onCancel),
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+
+        is DownloadUiState.Ready -> {
+            Text("模型下载完成 · 可以用了（点下方「加载模型」）", color = p.accent)
+            Spacer(Modifier.height(10.dp))
+        }
+
+        is DownloadUiState.Failed -> {
+            ModelProgressView(
+                phase = UiPhase.IDLE,
+                startedAtMs = null,
+                reason = download.message,
+                onRetry = onStart,
+                color = p.warn,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "知道了",
+                style = TextStyle(fontSize = 12.sp),
+                color = p.ink3,
+                modifier = Modifier.clickable(onClick = onDismiss),
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+    }
 }
 
 @Composable
