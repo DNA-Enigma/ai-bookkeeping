@@ -62,6 +62,77 @@ data class ModelWorkResult(
 )
 
 /**
+ * 一条**已生成、还没被界面取走**的回答。
+ *
+ * 它是「提问后切后台，回来回答已在」这件事的唯一真源，两条来路都落在这里：
+ *  - 进程活着：生成收场时同时写内存这一份和磁盘那一份；
+ *  - 进程被杀后重来：磁盘那份由 [ModelWorkController.attach] 播回内存。
+ *
+ * [answer] 刻意存**成品正文**而不是原始 token 流：成品已经过 ThinkingStripper
+ * 剔除与 ReplyStreamFilter 判定，重放时不必（也不该）再跑一遍那些规则。
+ *
+ * [storedAtMs] 是 `SystemClock.elapsedRealtime()`——单调，不受改系统时间影响。
+ * 它从**开机**起算，所以跨进程死亡仍然可比（同一次开机），跨重启就不在一条时间轴上，
+ * 那条必须由 [pendingAnswerIsFresh] 拦掉。
+ *
+ * [ageLine] 是播回那一刻算好的「刚刚 / 2 分钟前」。只有**磁盘播回**的条目带它，
+ * 内存里现生成的没有（就是此刻发生的事）——界面据此决定要不要说明这句的来路。
+ */
+data class PendingAnswer(
+    val question: String,
+    val answer: String,
+    val ok: Boolean = true,
+    val storedAtMs: Long? = null,
+    val ageLine: String? = null,
+    /** 随这条回答一起存下的一块**对 llm 层不透明**的数据（记账卡片等）。见 [TurnResult.payload]。 */
+    val payload: String? = null,
+)
+
+/**
+ * 陈旧判定的**纯函数核**：磁盘上的回答还该不该播回界面。
+ *
+ * 两条都要拦，缺一都会把假东西端给用户：
+ *  - **[ModelWorkStore.CLOCK_INVALID]**：写这条的进程拿不到单调时钟，落盘的是哨兵值。
+ *    它不能参与相减——相减会得到一个巨大的正数或负数，取决于开机早晚，表现成
+ *    「随机过期」，排查起来最费时间。宁可当它陈旧。
+ *  - **[maxAgeMs]**：真实时钟下超过这个年龄的回答不再算「刚答完」。
+ *    用户三天后回来，界面上杵着一条三天前的回答，比什么都没有更误导——
+ *    他会以为那是刚才那句话的答案。
+ *  - **时钟倒退**（`age < 0`）：同一次开机内 elapsedRealtime 不会倒退，倒退等于
+ *    这条比机器还老——不可能，判陈旧。不猜是哪一边的锅。
+ *
+ * [nowMs] 由调用方传（纯函数不自己摸时钟），测试给定值。
+ */
+internal fun pendingAnswerIsFresh(
+    storedAtMs: Long?,
+    nowMs: Long,
+    maxAgeMs: Long,
+): Boolean {
+    if (storedAtMs == null || storedAtMs == ModelWorkStore.CLOCK_INVALID) return false
+    val age = nowMs - storedAtMs
+    if (age < 0L) return false
+    return age <= maxAgeMs
+}
+
+/**
+ * 播回时的年龄文案。与 [pendingAnswerIsFresh] **同一套不可用判据**（哨兵值、
+ * 时钟倒退都返回 null）——两处判据必须一致，否则会出现「判为新鲜却说不清几时」的缝。
+ */
+internal fun pendingAnswerAgeLine(storedAtMs: Long?, nowMs: Long): String? {
+    if (storedAtMs == null || storedAtMs == ModelWorkStore.CLOCK_INVALID) return null
+    val age = nowMs - storedAtMs
+    if (age < 0L) return null
+    return when {
+        age < 60_000L -> "刚刚"
+        age < 60 * 60_000L -> "${age / 60_000L} 分钟前"
+        else -> "${age / (60 * 60_000L)} 小时前"
+    }
+}
+
+/** 一条待交付回答在磁盘/内存里的有效期。30 分钟：超过它，这句已答的不是用户刚问的事。 */
+internal const val PENDING_MAX_AGE_MS = 30 * 60_000L
+
+/**
  * 端侧模型长任务的**后台守护中枢**：谁把一条等待登记进来，前台服务就为它挂通知。
  *
  * ## 为什么状态要在控制器而不是服务里攒
@@ -103,6 +174,7 @@ class ModelWorkController @Inject constructor(
     @ApplicationContext private val context: Context,
     private val session: SparkSession,
     private val gate: NotificationGate,
+    private val store: ModelWorkStore,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -128,6 +200,47 @@ class ModelWorkController @Inject constructor(
     /** 前台服务是否存在（通知栏守护是否活着）。服务自己启停时回写。 */
     private val _guardActive = MutableStateFlow(false)
     val guardActive: StateFlow<Boolean> = _guardActive.asStateFlow()
+
+    /**
+     * **待交付回答**：已经生成完、但界面还没来得及取走的那一句。
+     *
+     * 界面订阅它做「回来回答已在」；每一次落定都同时写磁盘（[ModelWorkStore]），
+     * 因为进程随时可能被系统在后台杀掉——那时这份内存跟着一起没，
+     * 只有磁盘那份能把答案救回来。见 [attach]。
+     */
+    private val _pending = MutableStateFlow<PendingAnswer?>(null)
+    val pending: StateFlow<PendingAnswer?> = _pending.asStateFlow()
+
+    /**
+     * 进程起来时把磁盘上那条还没被取走的回答播回内存。**必须在 Application.onCreate 调**。
+     *
+     * 只在内存里还没有待交付项时播——本进程刚刚自己生成过一条的话，它更新、
+     * 且已经在 [pending] 里了，用磁盘上的旧一条盖掉等于让回答倒退。
+     *
+     * **不补发通知**：进程死掉之前那条「回答已生成」已经交给系统了
+     * （通知的生命周期不属于应用进程，App 被杀它还在，用户没点就还看得见）。
+     * 这里再发一次就是同一件事打扰两遍。
+     *
+     * [nowMs] 传 `SystemClock.elapsedRealtime()`，默认值只在测试路径成立以外的
+     * 场合都可接受——生产调用方就该用真实时钟。
+     */
+    fun attach(nowMs: Long = SystemClock.elapsedRealtime()) {
+        if (_pending.value != null) return
+        val stored = store.readPending() ?: return
+        if (!pendingAnswerIsFresh(stored.storedAtMs, nowMs, PENDING_MAX_AGE_MS)) {
+            // 陈旧的不播，但也别留在盘上：留着的后果是「下次开机它又新鲜了」——
+            // elapsedRealtime 归零重来，一条几小时的旧回答会被当成刚答完。
+            store.clearPending()
+            return
+        }
+        _pending.value = PendingAnswer(
+            question = stored.question,
+            answer = stored.answer,
+            ok = stored.ok,
+            storedAtMs = stored.storedAtMs,
+            ageLine = pendingAnswerAgeLine(stored.storedAtMs, nowMs),
+        )
+    }
 
     init {
         // 引擎状态机是「加载/生成」两类等待的真源：一进生成/加载类状态就登记，
@@ -297,16 +410,83 @@ class ModelWorkController @Inject constructor(
      *  - 等待从未登记（响应极短，StateFlow 合流跳过了 Generating）：
      *    同样落到补发分支——结果照样有通知。
      * 已有一条 GENERATE 结果未消费时忽略本次，避免重复打扰。
+     *
+     * [question] 是这句回答对应的那句提问。**传它**界面才有办法把回答归位
+     * （回来时用户问的那句话和答案得对得上，不然回答像凭空冒出来）。
+     * 落定后写进 [pending]——见那里的注释「为什么必须是磁盘」。
+     *
+     * [payload] 跟着一起落盘的一块对 `llm` 层不透明的数据（记账卡片等），
+     * 见 [PendingAnswer.payload]。
      */
-    fun completeGenerate(ok: Boolean, message: String) {
+    fun completeGenerate(
+        ok: Boolean,
+        message: String,
+        question: String = "",
+        payload: String? = null,
+    ) {
         val current = _progress.value
         if (current.kind == ModelWorkKind.GENERATE) {
             conclude(ModelWorkResult(ModelWorkKind.GENERATE, ok, message))
+            recordPending(question, message, ok, payload)
             return
         }
-        if (_result.value?.kind == ModelWorkKind.GENERATE) return
+        // 补发分支的去重按**内容**判，不按「有没有过一条 GENERATE 结果」判。
+        //
+        // 这里原本写的是 `_result.value?.kind == GENERATE → return`，而
+        // [consumeResult] 在全仓库**没有任何调用方**——于是第一条回答之后
+        // `_result` 永远停在 GENERATE，**第二条及以后的回答被静默丢掉**
+        // （既不通知也不落待交付）。这类 bug 的可怕之处在于它一声不响：
+        // 用户问第二句时界面毫无反应，而日志里什么都没有。
+        //
+        // 按内容判的语义也更贴原意——「重复打扰」指的是同一次收场被回报两遍，
+        // 不是「本进程以前答过一次」。用户把 pending 取走之后 [_pending] 归 null，
+        // 于是同样的问题再答一次照样会通知，这是对的。
+        val delivered = _pending.value
+        if (delivered != null && delivered.question == question && delivered.answer == message) return
         postResultNotification(ModelWorkResult(ModelWorkKind.GENERATE, ok, message))
         _result.value = ModelWorkResult(ModelWorkKind.GENERATE, ok, message)
+        recordPending(question, message, ok, payload)
+    }
+
+    /**
+     * 落定一条待交付回答：**先写磁盘再更新内存**。
+     *
+     * 这个顺序是刻意的——写盘之后进程哪怕立刻被杀，答案也已经在磁盘上了；
+     * 反过来（先更内存）就有一个「内存里有、盘上没有」的窗口，而进程被杀偏偏
+     * 就发生在这种窗口里（内存吃紧时系统优先杀的就是占着 1 GB 模型的后台进程）。
+     *
+     * 正文为空**什么都不写**：一条没有内容的回答播回界面只会是句怪话。
+     * 失败收场照样落一条（[ok] = false），因为用户有权知道那句他等了 100 秒的话
+     * 最后没答上来——切回来只看到初始状态，等于他的等待被静默吞掉了。
+     */
+    private fun recordPending(question: String, answer: String, ok: Boolean, payload: String?) {
+        if (answer.isBlank()) return
+        val at = runCatching { SystemClock.elapsedRealtime() }
+            .getOrDefault(ModelWorkStore.CLOCK_INVALID)
+        store.writePending(question, answer, ok, at, payload)
+        _pending.value = PendingAnswer(
+            question = question,
+            answer = answer,
+            ok = ok,
+            storedAtMs = at,
+            payload = payload,
+        )
+    }
+
+    /**
+     * 界面**已经消费**这条回答（已经渲染进消息流/面板）之后调。
+     *
+     * 内存与磁盘一起清——只清内存的话，下次冷启动 [attach] 会把同一条再播一遍，
+     * 用户看到的是「同一句话答了两次」。
+     *
+     * 顺手把 [_result] 也清掉：那条通道按内容去重之后不再需要它当闸门，
+     * 但留着一条陈旧的结果会让**别的可能订阅它的地方**读到过期数据。
+     */
+    fun consumePending() {
+        if (_pending.value == null) return
+        _pending.value = null
+        store.clearPending()
+        if (_result.value?.kind == ModelWorkKind.GENERATE) _result.value = null
     }
 
     /**

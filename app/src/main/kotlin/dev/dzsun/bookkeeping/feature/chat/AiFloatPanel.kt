@@ -27,6 +27,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import dev.dzsun.bookkeeping.llm.modelWorkOf
+import dev.dzsun.bookkeeping.llm.TurnResult
+import kotlinx.coroutines.flow.combine
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -79,6 +82,13 @@ fun AiFloatPanel(
     val azhang = remember {
         EntryPointAccessors.fromApplication(context, ChatAiEntryPoint::class.java).azhangChat()
     }
+    /**
+     * 进程级的问答执行器 + 待交付回答。
+     *
+     * 取不到（非 Hilt 宿主，理论上不会发生）就退回**原来的组合作用域**跑：
+     * 功能与改动前一致，只是切走会断——宁可用旧行为也不能让面板打不开。
+     */
+    val work = remember { modelWorkOf(context) }
     val addEntry: AddEntryViewModel = hiltViewModel()
 
     var input by remember { mutableStateOf("") }
@@ -117,16 +127,122 @@ fun AiFloatPanel(
     // 等用户打完字再开始加载，那条消息就白等了。
     LaunchedEffect(Unit) { azhang.warmUp() }
 
+    /*
+     * ── 接回现场：切走再回来，回答不能丢 ─────────────────────────────
+     *
+     * 面板的显示状态**全部由这一处订阅推导**，不在别的地方各写一份。
+     * 两个真源合起来正好覆盖「回来时可能发生的一切」：
+     *
+     *  - `runner.turn` —— 还在跑的那一轮（草稿、思考素材、起点）。
+     *  - `controller.pending` —— 已经落定、还没被界面取走的那一条。
+     *
+     * 后者的两条来路是**同一个字段**，界面不需要知道中间发生过什么：
+     *   1. 进程还活着（切后台、或收起面板又打开）：那一轮由 [ModelWorkRunner]
+     *      在单例作用域里跑完了，直接在这条流上收到；
+     *   2. 进程被系统杀过：内存那份跟着没了，[ModelWorkController.attach] 在
+     *      Application.onCreate 把磁盘那条播回——**界面走的还是同一个字段**。
+     *      这就是落盘的全部意义：只做前者，冷启动照样丢答案。
+     *
+     * `pending` 优先于 `turn`：正常收场顺序是「先落 pending、后清 turn」，
+     * StateFlow 可能把中间态（两个都有值）交上来；答案既然已经存在，
+     * 就不该显示成「还在生成」。
+     *
+     * `else -> Unit` 那条不是偷懒：取走回答后 [ModelWorkController.consumePending]
+     * 会让两个源同时归 null，那是「这一轮已经交付完了」，不是「没有内容可显示」——
+     * 清空就把刚给出的答案擦掉了。
+     */
+    LaunchedEffect(work) {
+        val w = work ?: return@LaunchedEffect
+        combine(w.first.turn, w.second.pending) { turn, pending -> turn to pending }
+            .collect { (t, p) ->
+                when {
+                    p != null -> {
+                        lastText = p.question
+                        busy = false
+                        turnStart = null
+                        // 播回的那句要交代来路——「2 分钟前」不是装饰：
+                        // 用户切走十分钟回来，得知道这句是他走之前那句问话的答案。
+                        reply = p.ageLine?.let { "${p.answer}\n\n（这句是 $it 答完的）" } ?: p.answer
+                        // 卡片从 payload 里解出来：**只恢复文字的话，用户回来看到
+                        // 识别结果却点不了「记下来」，那还是丢了一次**。
+                        entry = decodePanelCard(p.payload)
+                        status = if (p.ok) PanelStatus.DONE else PanelStatus.FAILED
+                        if (entry != null) status = PanelStatus.DONE
+                        thinking.finish(SystemClock.elapsedRealtime())
+                        thinking.collapse()
+                        // **取走即清**（内存 + 磁盘一起）：留着的话下次冷启动会再播一遍，
+                        // 同一句话答两次是最容易被当成 bug 报上来的。
+                        w.second.consumePending()
+                    }
+
+                    t != null -> {
+                        lastText = t.question
+                        busy = true
+                        turnStart = t.startedAtMs
+                        reply = t.draft
+                        status = if (t.draft.isEmpty()) PanelStatus.PREPARING else PanelStatus.STREAMING
+                        // 思考素材：只喂折叠区（内部走 ThinkingThrottle，≥150ms 才刷一次），
+                        // 面板其余部分不随生成节奏重组。收到第一块才把折叠区挂出来——
+                        // 纯准备阶段头部/正文区的 ModelProgressLine 已经在说进度了。
+                        if (t.thought.isNotEmpty()) {
+                            thinkingOn = true
+                            thinking.append(t.thought, SystemClock.elapsedRealtime())
+                        }
+                    }
+
+                    else -> Unit
+                }
+            }
+    }
+
     fun startTurn(text: String) {
         if (text.isEmpty() || busy) return
-        lastText = text
-        busy = true
+        // 立刻把上一轮的显示清掉：不清的话用户会以为新那句已经被答了。
         saved = null
         entry = null
         reply = ""
+        thinking.start(SystemClock.elapsedRealtime())
+
+        val w = work
+        if (w != null) {
+            // 交给进程级执行器：**收起面板、跳页、切后台都掐不掉它**。
+            // 草稿由 runner.turn 累积（上面那个订阅在渲染），这里不再自己拼字符串——
+            // 两处各拼一份迟早会漂。
+            w.first.start(text) { sink ->
+                var finish: AzhangTurn? = null
+                val streamed = withTimeoutOrNull(PANEL_TURN_BUDGET_MS) {
+                    azhang.streamTurn(text).collect { ev ->
+                        when (ev) {
+                            is AzhangStream.Preparing -> Unit
+                            is AzhangStream.Thinking -> sink.thought(ev.delta)
+                            is AzhangStream.Text -> sink.answer(ev.delta)
+                            is AzhangStream.Finish -> finish = ev.turn
+                        }
+                    }
+                    true
+                } == true
+                // 正文以**订阅里的草稿**为准（它是这条流的唯一真源），
+                // 卡片与成败由纯函数从终局判定推出来——两处共用同一个核。
+                val body = panelTurnBody(
+                    finished = finish,
+                    streamed = streamed,
+                    draft = w.first.turn.value?.draft ?: "",
+                    isReady = azhang.isReady,
+                )
+                TurnResult(
+                    answer = body.reply,
+                    ok = body.ok,
+                    payload = encodePanelCard(body.card),
+                )
+            }
+            return
+        }
+
+        // 取不到单例（非 Hilt 宿主，理论上不会发生）：退回改动前的组合作用域路径。
+        // 功能与改动前完全一致，只是切走会断——宁可用旧行为也不能让面板打不开。
+        busy = true
         turnStart = SystemClock.elapsedRealtime()
         status = PanelStatus.PREPARING
-        thinking.start(SystemClock.elapsedRealtime())
         scope.launch {
             var finish: AzhangTurn? = null
             val ok = withTimeoutOrNull(PANEL_TURN_BUDGET_MS) {
@@ -153,39 +269,15 @@ fun AiFloatPanel(
                 true
             } == true
 
-            // finish 在闭包里被赋值过，Kotlin 不允许对它做智能转换 ——
-            // 先拷成本地不可变引用，后面就能直接 is 判断了。
-            val result = finish
-            when {
-                // 超时：把已经吐出来的部分留着，别整段吞掉
-                !ok -> {
-                    status = if (reply.isNotEmpty()) PanelStatus.DONE else PanelStatus.FAILED
-                    // 超时要分清「还在加载」和「真出不来」——首次冷启动解码就要 100s 上下
-                    if (reply.isEmpty()) reply = if (azhang.isReady) TIMEOUT_TEXT else PREPARING_TIMEOUT_TEXT
-                }
-
-                result is AzhangTurn.Entry -> {
-                    entry = result.entries.first()
-                    status = PanelStatus.DONE
-                }
-
-                result is AzhangTurn.Reply -> {
-                    // 模型认领「查账」→ 不编数字，换成能直接照做的引导
-                    reply = if (result.isLedgerQuery) QUERY_GUIDE else result.body
-                    // 模型只回了话、由本地规则补出来的卡片，照样出 —— 见 withRulesEntryFallback
-                    result.entries.firstOrNull()?.let { entry = it }
-                    status = PanelStatus.DONE
-                }
-
-                else -> {
-                    // 失败必须显示**真实原因**（模型没就绪/超时/输出不是 JSON），
-                    // 不能再挂一句与现场无关的兜底话术；原因本身已带下一步动作。
-                    status = PanelStatus.FAILED
-                    val reason = (result as? AzhangTurn.Unavailable)
-                        ?.reason?.takeIf { it.isNotBlank() } ?: FAILED_TEXT
-                    reply = if (reply.isEmpty()) reason else "$reply\n\n—— $reason"
-                }
-            }
+            val body = panelTurnBody(
+                finished = finish,
+                streamed = ok,
+                draft = reply,
+                isReady = azhang.isReady,
+            )
+            reply = body.reply
+            entry = body.card
+            status = if (body.ok) PanelStatus.DONE else PanelStatus.FAILED
             // 收尾（成功、超时、失败都算）：强制发布最后几个被节流掉的字，
             // 摘要换成「查看思考过程」；用户中途展开过的话收回去——正文才是主角。
             thinking.finish(SystemClock.elapsedRealtime())
@@ -458,6 +550,129 @@ private fun PanelChip(text: String, modifier: Modifier = Modifier, onClick: () -
     ) {
         Text(text, style = TextStyle(fontSize = 11.5.sp, letterSpacing = .5.sp), color = p.ink2)
     }
+}
+
+/**
+ * 一轮的终局 → 面板该显示什么。**纯函数**，单测直接钉（不碰 Compose）。
+ *
+ * 为什么把这段从协程体里抽出来：正文与卡片现在有**两个来路**——
+ * 页面活着时走订阅、进程被杀重来时走磁盘播回。判定规则收在这一个函数里，
+ * 两条路才不会各说各话（同一条回答，切之前显示卡片、切回来只剩文字，
+ * 是最难复现的那类 bug）。
+ *
+ * [draft] 一律传**订阅里的草稿**，不在这里自己拼字符串：草稿的真源只有一处
+ * （见 [startTurn] 的注释），两处各拼一份迟早会漂。
+ *
+ * 三条口径与改动前逐字相同：
+ *  - 超时留半截：一个字都没吐才算失败，吐了就把已经显示的留着；
+ *  - 超时文案分清「还在加载」和「真出不来」——首次冷启动解码就要 100s 上下；
+ *  - 失败必须显示**真实原因**，不再挂一句与现场无关的兜底话术。
+ */
+internal fun panelTurnBody(
+    finished: AzhangTurn?,
+    streamed: Boolean,
+    draft: String,
+    isReady: Boolean,
+): PanelTurnBody = when {
+    !streamed -> PanelTurnBody(
+        reply = when {
+            draft.isNotEmpty() -> "$draft\n\n—— $TIMEOUT_TEXT"
+            isReady -> TIMEOUT_TEXT
+            else -> PREPARING_TIMEOUT_TEXT
+        },
+        // 超时但已经吐了字：算「有内容可看」。没有卡片，也不算失败态。
+        card = null,
+        ok = draft.isNotEmpty(),
+    )
+
+    finished is AzhangTurn.Entry -> PanelTurnBody(
+        reply = draft,
+        card = finished.entries.firstOrNull(),
+        ok = true,
+    )
+
+    finished is AzhangTurn.Reply -> PanelTurnBody(
+        // 模型认领「查账」→ 不编数字，换成能直接照做的引导。
+        reply = if (finished.isLedgerQuery) QUERY_GUIDE else finished.body,
+        // 模型只回了话、由本地规则补出来的卡片，照样出 —— 见 withRulesEntryFallback。
+        card = finished.entries.firstOrNull(),
+        ok = true,
+    )
+
+    else -> {
+        val reason = (finished as? AzhangTurn.Unavailable)
+            ?.reason?.takeIf { it.isNotBlank() } ?: FAILED_TEXT
+        PanelTurnBody(
+            reply = if (draft.isEmpty()) reason else "$draft\n\n—— $reason",
+            card = null,
+            ok = false,
+        )
+    }
+}
+
+/**
+ * 一轮终局的产物。[ok] = false 时 [reply] 是真实失败原因——界面照样要显示。
+ * [card] 是那张能点「记下来」的卡片，没有就 null。
+ */
+internal data class PanelTurnBody(
+    val reply: String,
+    val card: dev.dzsun.bookkeeping.feature.entry.ParsedEntry?,
+    val ok: Boolean,
+)
+
+/**
+ * 卡片落盘的形状。**只存恢复一张卡所必需的四个字段**，不存 id/confidence——
+ * 那两样在恢复时没有意义（卡已经不是刚生成的了），而 [saveQuickEntry] 真正用到的
+ * 就是 amountText / categoryName / note 这三样，kind 用于展示口径。
+ *
+ * 走 kotlinx.serialization 而不是自拼分隔符：备注是模型给的自由文本，
+ * 里面出现 `|` 完全可能（「拿铁|大杯」），自拼分隔符会被劈错列——
+ * 那等于把用户的备注切成两半，比不恢复更糟。
+ */
+@kotlinx.serialization.Serializable
+private data class PanelCardWire(
+    val amountText: String,
+    val categoryName: String,
+    val note: String,
+    val kind: dev.dzsun.bookkeeping.feature.entry.EntryKind,
+)
+
+private val panelCardJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+/**
+ * 卡片 → 随回答一起落盘的那串文本。没有卡片返回 **null**（不是空串——
+ * 空串会被解成「有一张卡但字段全空」）。
+ */
+internal fun encodePanelCard(entry: dev.dzsun.bookkeeping.feature.entry.ParsedEntry?): String? {
+    val e = entry ?: return null
+    return runCatching {
+        panelCardJson.encodeToString(
+            PanelCardWire(e.amountText, e.categoryName, e.note, e.kind),
+        )
+    }.getOrNull()
+}
+
+/**
+ * 那串文本 → 卡片。**解不出来一律 null**：界面只显示文字，
+ * 不显示一张点不动的空卡片。金额或分类为空也作废——一张没有金额的卡对用户没有意义。
+ */
+internal fun decodePanelCard(payload: String?): dev.dzsun.bookkeeping.feature.entry.ParsedEntry? {
+    val p = payload ?: return null
+    val wire = runCatching {
+        panelCardJson.decodeFromString<PanelCardWire>(p)
+    }.getOrNull() ?: return null
+    if (wire.amountText.isBlank() || wire.categoryName.isBlank()) return null
+    return dev.dzsun.bookkeeping.feature.entry.ParsedEntry(
+        id = "restored",
+        kind = wire.kind,
+        amountText = wire.amountText,
+        categoryName = wire.categoryName,
+        payee = "",
+        note = wire.note,
+        // 恢复出来的卡**不继承**原置信度：那张卡不是刚生成的了，
+        // 拿 0.98 去点亮「高置信」的样式是在替用户做一个已经过期了的判断。
+        confidence = 1f,
+    )
 }
 
 /** 模型认领「查账」时给的引导 —— 它不编数字，所以要给一句能直接照做的话。 */
