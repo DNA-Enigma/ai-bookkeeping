@@ -19,6 +19,10 @@ interface AuthRepository {
     /** 当前会话是否可用（JWT 没过期）。**离线可判**——看过期时刻，不问服务端。 */
     suspend fun isLoggedIn(): Boolean
 
+    /** 游客模式：不注册直接使用。 */
+    fun isGuest(): Boolean
+    fun enterGuestMode()
+
     /** 发验证码。返回服务端给的重发冷却秒数（界面倒计时用它，不写死 60）。 */
     suspend fun sendCode(email: String): SendCodeOutcome
 
@@ -53,6 +57,10 @@ class ServerAuthRepository @Inject constructor(
 
     override suspend fun isLoggedIn(): Boolean =
         tokenStore.hasUsableToken(System.currentTimeMillis() / 1000)
+
+    override fun isGuest(): Boolean = tokenStore.isGuestMode()
+
+    override fun enterGuestMode() = tokenStore.setGuestMode()
 
     override suspend fun sendCode(email: String): SendCodeOutcome = try {
         val ack = api.sendCode(email)

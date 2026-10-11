@@ -60,10 +60,17 @@ class TokenStore @Inject constructor(
             nowSeconds = nowSeconds,
         )
 
-    /** 退出登陆：把会话清干净。 */
+    /** 退出登陆：把会话清干净（含游客模式）。 */
     fun clear() {
-        prefs.edit().remove(KEY_TOKEN).remove(KEY_EXPIRES_AT).remove(KEY_EMAIL).apply()
+        prefs.edit().remove(KEY_TOKEN).remove(KEY_EXPIRES_AT).remove(KEY_EMAIL).remove(KEY_GUEST).apply()
     }
+
+    /** 游客模式（不注册直接使用）：记一个标记，下次启动直接进主页。 */
+    fun setGuestMode() {
+        prefs.edit().putBoolean(KEY_GUEST, true).apply()
+    }
+
+    fun isGuestMode(): Boolean = prefs.getBoolean(KEY_GUEST, false)
 
     /**
      * 抹掉上一版留在同一份 prefs 里的本地账号材料。
@@ -88,6 +95,7 @@ class TokenStore @Inject constructor(
         const val KEY_TOKEN = "token"
         const val KEY_EXPIRES_AT = "expires_at_seconds"
         const val KEY_EMAIL = "email"
+        const val KEY_GUEST = "guest_mode"
 
         /** 上一版的键，仅用于清除，不再有写入点。 */
         const val KEY_LEGACY_PLAINTEXT_PASSWORD = "password"

@@ -156,6 +156,15 @@ fun LoginScreen(state: AuthUiState, viewModel: AuthViewModel) {
         TextButton(onClick = viewModel::toggleLoginMode) {
             Text(if (state.useCodeLogin) "用密码登录" else "用验证码登录")
         }
+        OutlinedButton(
+            onClick = viewModel::skipLogin,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp),
+            shape = RoundedCornerShape(14.dp),
+        ) {
+            Text("不注册，直接使用", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Row(horizontalArrangement = Arrangement.Center) {
             Text("还没有账号？", color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(onClick = viewModel::goRegister) { Text("去注册") }

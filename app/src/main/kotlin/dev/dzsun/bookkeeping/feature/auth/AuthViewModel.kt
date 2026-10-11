@@ -53,11 +53,23 @@ class AuthViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            // 启动流：短暂品牌动画，然后按会话分流（JWT 有效直接进主页）
+            // 启动流：短暂品牌动画，然后按会话分流（JWT 有效或游客模式直接进主页）
             _state.update {
-                it.copy(route = if (repository.isLoggedIn()) AuthRoute.MAIN else AuthRoute.LOGIN)
+                it.copy(
+                    route = if (repository.isLoggedIn() || repository.isGuest()) {
+                        AuthRoute.MAIN
+                    } else {
+                        AuthRoute.LOGIN
+                    },
+                )
             }
         }
+    }
+
+    /** 不注册直接使用（游客模式）：下次启动也直接进主页。 */
+    fun skipLogin() {
+        repository.enterGuestMode()
+        _state.update { it.copy(route = AuthRoute.MAIN) }
     }
 
     fun onEmailChange(v: String) = _state.update { it.copy(email = v, error = null) }
