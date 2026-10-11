@@ -391,6 +391,7 @@ data class Problem(
         const val CODE_TIMEOUT = "timeout"
         const val CODE_CANCELLED = "cancelled"
         const val CODE_RATE_LIMITED = "rate_limited"
+        const val CODE_UNAUTHORIZED = "unauthorized"
         const val CODE_NOT_FOUND = "not_found"
         const val CODE_RESULT_NOT_READY = "result_not_ready"
 

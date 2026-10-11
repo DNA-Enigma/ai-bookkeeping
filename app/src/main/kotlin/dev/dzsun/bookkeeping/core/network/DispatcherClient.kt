@@ -1,5 +1,6 @@
 package dev.dzsun.bookkeeping.core.network
 
+import dev.dzsun.bookkeeping.core.platform.TokenStore
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -12,7 +13,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -26,16 +26,11 @@ import kotlinx.serialization.json.JsonObject
 @Singleton
 class DispatcherClient @Inject constructor(
     private val config: DispatcherConfig,
+    private val tokenStore: TokenStore? = null,
 ) {
 
-    private val json = Json {
-        // 契约承诺只做加法（新增可选字段），而手机无法强制升级 —— 必须容忍不认识的字段
-        ignoreUnknownKeys = true
-        // 不把 null 发出去，但**默认值要发**：
-        // supports_last_event_id 这类字段若被省略，服务端会按它自己的默认处理，我们就失去了声明能力
-        explicitNulls = false
-        encodeDefaults = true
-    }
+    /** 与 `/auth` 下的账号端点共用同一份 JSON 口径，见 [wireJson]。 */
+    private val json = wireJson
 
     // ------------------------------------------------------------ 媒体
 
@@ -246,33 +241,34 @@ class DispatcherClient @Inject constructor(
         connection.readTimeout = readTimeoutMs
         connection.setRequestProperty("Accept", CONTENT_TYPE_JSON)
         headers.forEach { (name, value) -> connection.setRequestProperty(name, value) }
-        // 契约只声明了全局 bearerAuth(JWT)，但没有发放 token 的端点 —— 见 DispatcherConfig
-        config.bearerToken?.let { connection.setRequestProperty("Authorization", "Bearer $it") }
+        // 无令牌时**不发这个头**，而不是发一个空的 "Bearer "——
+        // 后者会被中间件当成"提供了凭据但无效"，回的是 invalid_token，
+        // 而不是"缺少凭据"，排查时会指错方向。
+        authorization()?.let { connection.setRequestProperty("Authorization", it) }
         return connection
     }
 
     /**
-     * 把错误响应还原成有类型的 [Problem]。
+     * 本次请求的 `Authorization` 头。**每个请求现取**，不在构造时缓存：
+     * 令牌是登陆之后才有的，而 [DispatcherClient] 是单例——构造时读一次的话，
+     * 登陆前建好的那个实例会把"没有令牌"这个状态一直带下去，直到进程重启。
      *
-     * 响应体不是合法 Problem 时**不假装它是传输失败**——那会让调用方
-     * 对一个 400 盲目重试。这里合成一个 code 为 `untyped_error` 的 Problem，
-     * 并只按 HTTP 语义决定可重试性。
+     * 取值顺序是**部署主令牌优先于账号令牌**，理由是一个实测事实：
+     * `/v1` 下的鉴权中间件只认两类凭据——配置里的主令牌，以及 `POST /v1/tokens`
+     * 发放并登记在册的子令牌。`/auth/login` 签发的用户 JWT **既不是前者也不在
+     * 登记簿里**，所以在配了 `DISPATCHER_AUTH_TOKEN` 的部署上，带上用户 JWT
+     * 只会得到 401 `token 无效`（已实测）。反过来，本地开发没配主令牌时
+     * 鉴权是关的，带什么都一样——于是"用户令牌优先"在今天就只有一个效果：
+     * 把本来能用的请求变成 401。
+     *
+     * 等后端让 `/v1` 下的端点接受用户 JWT（见报告里的契约缺口），把这个顺序倒过来即可。
      */
-    private fun problemFrom(httpStatus: Int, body: ByteArray): DispatcherException {
-        val decoded = runCatching { json.decodeFromString<Problem>(body.decodeToString()) }.getOrNull()
-        val problem = decoded ?: Problem(
-            type = "about:blank",
-            title = "HTTP $httpStatus",
-            status = httpStatus,
-            code = "untyped_error",
-            retryable = httpStatus >= 500,
-            detail = body.decodeToString().take(MAX_DETAIL_CHARS).ifBlank { null },
-        )
-        return DispatcherException(problem, problem.detail ?: problem.title)
-    }
+    private fun authorization(): String? =
+        (config.bearerToken ?: tokenStore?.token())?.let { "Bearer $it" }
+
+    // 错误体解码见 Wire.kt 的 problemFrom —— 与账号端点共用同一份实现。
 
     private companion object {
-        const val CONTENT_TYPE_JSON = "application/json"
         const val CONTENT_TYPE_EVENT_STREAM = "text/event-stream"
         const val HEADER_IDEMPOTENCY_KEY = "Idempotency-Key"
         const val HEADER_LAST_EVENT_ID = "Last-Event-ID"
@@ -299,8 +295,6 @@ class DispatcherClient @Inject constructor(
 
         /** 要大于服务端的 sse_heartbeat_ms（默认 15000），否则心跳还没来就被我们掐了。 */
         const val STREAM_READ_TIMEOUT_MS = 60_000
-
-        const val MAX_DETAIL_CHARS = 500
     }
 }
 
