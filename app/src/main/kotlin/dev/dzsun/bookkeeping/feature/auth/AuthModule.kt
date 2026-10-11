@@ -16,5 +16,5 @@ abstract class AuthModule {
 
     @Binds
     @Singleton
-    abstract fun bindAuthRepository(impl: LocalAuthRepository): AuthRepository
+    abstract fun bindAuthRepository(impl: ServerAuthRepository): AuthRepository
 }

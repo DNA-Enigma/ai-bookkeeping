@@ -5,6 +5,21 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * 本地会话存储接口（旧的本地账号机制用，2026-10-11 起已被
+ * [dev.dzsun.bookkeeping.core.platform.TokenStore] + [ServerAuthRepository] 取代）。
+ * 留着只为编译兼容与旧数据清理，新代码不要引用。
+ */
+interface SessionStore {
+    fun email(): String?
+    fun setEmail(email: String?)
+
+    /** 不可逆的口令校验值（[PasswordVerifier.hash] 的产物），**不是口令**。 */
+    fun passwordHash(): String?
+    fun saveAccount(email: String, passwordHash: String)
+    fun clearSession()
+}
+
 @Singleton
 class SharedPrefsSessionStore @Inject constructor(
     @ApplicationContext context: Context,

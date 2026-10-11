@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -95,9 +96,39 @@ fun SplashScreen() {
 fun LoginScreen(state: AuthUiState, viewModel: AuthViewModel) {
     AuthScaffold(
         title = "欢迎回来",
-        subtitle = "登录后账单在多台设备间同步",
+        subtitle = "邮箱验证码登录，登录后账单在多台设备间同步",
     ) {
-        EmailPasswordFields(state, viewModel)
+        EmailField(state, viewModel)
+        Spacer(Modifier.height(12.dp))
+        if (state.useCodeLogin) {
+            // 验证码 + 发送按钮（60 秒倒计时，秒数以服务端 resend_after 为准）
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = state.code,
+                    onValueChange = viewModel::onCodeChange,
+                    modifier = Modifier.weight(1f),
+                    label = { Text("验证码") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    shape = RoundedCornerShape(12.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(
+                    onClick = viewModel::sendCode,
+                    enabled = state.canSendCode,
+                    modifier = Modifier.height(56.dp),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text(
+                        if (state.resendCountdown > 0) "${state.resendCountdown}s" else "发送验证码",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        } else {
+            PasswordField(state, viewModel)
+        }
+        Spacer(Modifier.height(20.dp))
         Button(
             onClick = viewModel::signIn,
             enabled = state.canSubmitLogin,
@@ -119,10 +150,12 @@ fun LoginScreen(state: AuthUiState, viewModel: AuthViewModel) {
         state.error?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
-        TextButton(onClick = viewModel::goForgot) {
-            Text("忘记密码？")
+        state.notice?.let {
+            Text(it, color = IncomeGreen, style = MaterialTheme.typography.bodySmall)
         }
-        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = viewModel::toggleLoginMode) {
+            Text(if (state.useCodeLogin) "用密码登录" else "用验证码登录")
+        }
         Row(horizontalArrangement = Arrangement.Center) {
             Text("还没有账号？", color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(onClick = viewModel::goRegister) { Text("去注册") }
@@ -134,9 +167,55 @@ fun LoginScreen(state: AuthUiState, viewModel: AuthViewModel) {
 fun RegisterScreen(state: AuthUiState, viewModel: AuthViewModel) {
     AuthScaffold(
         title = "创建账号",
-        subtitle = "邮箱 + 密码，一分钟搞定",
+        subtitle = "邮箱验证码注册，密码可选",
     ) {
-        EmailPasswordFields(state, viewModel, showConfirm = true)
+        EmailField(state, viewModel)
+        Spacer(Modifier.height(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = state.code,
+                onValueChange = viewModel::onCodeChange,
+                modifier = Modifier.weight(1f),
+                label = { Text("验证码") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                shape = RoundedCornerShape(12.dp),
+            )
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(
+                onClick = viewModel::sendCode,
+                enabled = state.canSendCode,
+                modifier = Modifier.height(56.dp),
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Text(
+                    if (state.resendCountdown > 0) "${state.resendCountdown}s" else "发送验证码",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        // 密码可选：留空 = 只用验证码登录
+        var showPassword by remember { mutableStateOf(false) }
+        OutlinedTextField(
+            value = state.password,
+            onValueChange = viewModel::onPasswordChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("密码（可选，留空则仅用验证码）") },
+            singleLine = true,
+            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            shape = RoundedCornerShape(12.dp),
+            trailingIcon = {
+                IconButton(onClick = { showPassword = !showPassword }) {
+                    Icon(
+                        if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = null,
+                    )
+                }
+            },
+        )
+        Spacer(Modifier.height(20.dp))
         Button(
             onClick = viewModel::register,
             enabled = state.canSubmitRegister,
@@ -157,6 +236,9 @@ fun RegisterScreen(state: AuthUiState, viewModel: AuthViewModel) {
         }
         state.error?.let {
             Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        state.notice?.let {
+            Text(it, color = IncomeGreen, style = MaterialTheme.typography.bodySmall)
         }
         Row(horizontalArrangement = Arrangement.Center) {
             Text("已有账号？", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -223,12 +305,7 @@ private fun AuthScaffold(
 }
 
 @Composable
-private fun EmailPasswordFields(
-    state: AuthUiState,
-    viewModel: AuthViewModel,
-    showConfirm: Boolean = false,
-) {
-    var showPassword by remember { mutableStateOf(false) }
+private fun EmailField(state: AuthUiState, viewModel: AuthViewModel) {
     OutlinedTextField(
         value = state.email,
         onValueChange = viewModel::onEmailChange,
@@ -238,7 +315,11 @@ private fun EmailPasswordFields(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
         shape = RoundedCornerShape(12.dp),
     )
-    Spacer(Modifier.height(12.dp))
+}
+
+@Composable
+private fun PasswordField(state: AuthUiState, viewModel: AuthViewModel) {
+    var showPassword by remember { mutableStateOf(false) }
     OutlinedTextField(
         value = state.password,
         onValueChange = viewModel::onPasswordChange,
@@ -257,24 +338,4 @@ private fun EmailPasswordFields(
             }
         },
     )
-    if (showConfirm) {
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = state.confirmPassword,
-            onValueChange = viewModel::onConfirmPasswordChange,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("确认密码") },
-            singleLine = true,
-            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            shape = RoundedCornerShape(12.dp),
-            isError = state.confirmPassword.isNotBlank() && state.confirmPassword != state.password,
-            supportingText = {
-                if (state.confirmPassword.isNotBlank() && state.confirmPassword != state.password) {
-                    Text("两次密码不一致")
-                }
-            },
-        )
-    }
-    Spacer(Modifier.height(20.dp))
 }
