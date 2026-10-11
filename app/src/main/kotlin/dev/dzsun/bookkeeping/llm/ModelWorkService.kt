@@ -242,10 +242,12 @@ class NotificationGate @Inject constructor(
     }
 
     companion object {
+        // 渠道名与图标 id 都不用 const：SMALL_ICON_RES 引用 R 常量，const 会让
+        // 增量编译的 IR 常量折叠在 stub 上炸出 AssertionError（已实测两次）。
         const val CHANNEL_WORK = "model_work"
         const val CHANNEL_RESULT = "model_result"
 
         /** 通知小图标：直接复用 launcher 前景（白账本轮廓），不另引一套资源。 */
-        const val SMALL_ICON_RES = dev.dzsun.bookkeeping.R.drawable.ic_launcher_foreground
+        val SMALL_ICON_RES = dev.dzsun.bookkeeping.R.drawable.ic_launcher_foreground
     }
 }
