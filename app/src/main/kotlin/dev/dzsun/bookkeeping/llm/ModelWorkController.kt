@@ -388,7 +388,11 @@ internal fun progressText(progress: ModelWorkProgress, nowMs: Long?): Pair<Strin
     }
     val elapsed = progress.startedAtMs
         ?.let { start -> nowMs?.let { (it - start).coerceAtLeast(0L) } }
-    val body = if (progress.kind == ModelWorkKind.RELEASE) {
+    // 与页面（ModelProgressView）同口径：releasePercent 为 null = 没有真分母，
+    // 不画进度条也不造「0 / 共 0 MB」，退回「阶段名 + 已用时」。
+    val body = if (progress.kind == ModelWorkKind.RELEASE &&
+        releasePercent(progress.bytesDone, progress.bytesTotal) != null
+    ) {
         releaseLine(progress.bytesDone, progress.bytesTotal, elapsed)
     } else {
         waitHeadline(progress.phase, elapsed)
