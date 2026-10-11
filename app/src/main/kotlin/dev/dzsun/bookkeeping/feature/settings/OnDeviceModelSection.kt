@@ -38,10 +38,16 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.dzsun.bookkeeping.core.designsystem.Art
 import dev.dzsun.bookkeeping.llm.ModelInstaller
+import dev.dzsun.bookkeeping.llm.ModelProgressView
 import dev.dzsun.bookkeeping.llm.ReadyResult
 import dev.dzsun.bookkeeping.llm.SessionState
 import dev.dzsun.bookkeeping.llm.SparkSession
+import dev.dzsun.bookkeeping.llm.UiPhase
 import dev.dzsun.bookkeeping.llm.issueMessage
+import dev.dzsun.bookkeeping.llm.phaseLabel
+import dev.dzsun.bookkeeping.llm.releasePercent
+import dev.dzsun.bookkeeping.llm.rememberUiPhase
+import dev.dzsun.bookkeeping.llm.rememberWaitStart
 import java.io.File
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -125,6 +131,29 @@ class OnDeviceModelViewModel @Inject constructor(
     private val assets = AssetModelAssets(context)
     private val installer = ModelInstaller(assets, File(context.filesDir, "models"))
 
+    /**
+     * 引擎状态直出 —— 界面用 [dev.dzsun.bookkeeping.llm.phaseOf] 折成阶段。
+     * 「加载权重」和「解码系统提示」必须分开显示，靠的就是这份真实状态，
+     * 不在这里另存一份阶段快照（两份状态必然漂移，见 [sessionState] 那段注释）。
+     */
+    val engineState: kotlinx.coroutines.flow.StateFlow<com.arm.aichat.InferenceEngine.State>
+        get() = session.state
+
+    /**
+     * 本次等待的起点（`SystemClock.elapsedRealtime()`，单调）。
+     * 由发起动作的这一方记；别的页面发起时这里为 null，界面退回「本页首次观察到」计时。
+     */
+    private val _waitStart = MutableStateFlow<Long?>(null)
+    val waitStart: StateFlow<Long?> = _waitStart.asStateFlow()
+
+    private fun markWaitStart() {
+        _waitStart.value = SystemClock.elapsedRealtime()
+    }
+
+    private fun clearWaitStart() {
+        _waitStart.value = null
+    }
+
     /** 设备上当前能找到的模型文件；释放内置模型后刷新，UI 用它渲染状态行。 */
     private val _modelFile = MutableStateFlow(findModel())
     val modelFile: StateFlow<File?> = _modelFile.asStateFlow()
@@ -153,6 +182,9 @@ class OnDeviceModelViewModel @Inject constructor(
     }
 
     fun load() {
+        // 计时从**用户按下按钮**开始：释放 + 加载 + 解码是一条连续的等待，
+        // 拆成三段各起各的表，用户看到的总时长会比真实短。
+        markWaitStart()
         val file = findModel()
         if (file == null) {
             installBundledModel()
@@ -180,6 +212,7 @@ class OnDeviceModelViewModel @Inject constructor(
                 }
             } catch (e: Throwable) {
                 _action.value = OnDeviceUiState.Failed("释放模型失败：${e.message ?: e.javaClass.simpleName}")
+                clearWaitStart()
                 Log.e(TAG, "install bundled model failed", e)
                 return@launch
             }
@@ -187,13 +220,18 @@ class OnDeviceModelViewModel @Inject constructor(
             when {
                 result is ModelInstaller.Result.Failed -> {
                     _action.value = OnDeviceUiState.Failed(result.message)
+                    clearWaitStart()
                     Log.w(TAG, "install bundled model failed: ${result.message}")
                 }
                 _modelFile.value != null -> {
+                    // 释放成功 → 接着加载：**不清计时**，整条链用同一个起点
                     Log.i(TAG, "bundled model installed: ${_modelFile.value!!.absolutePath}")
                     loadFile(_modelFile.value!!)
                 }
-                else -> _action.value = OnDeviceUiState.Failed("释放后仍找不到模型文件")
+                else -> {
+                    _action.value = OnDeviceUiState.Failed("释放后仍找不到模型文件")
+                    clearWaitStart()
+                }
             }
         }
     }
@@ -211,12 +249,14 @@ class OnDeviceModelViewModel @Inject constructor(
                 is ReadyResult.Ready -> {
                     // 加载成功是 settled 状态：清掉本地动作，显示交给属主的 Ready
                     _action.value = null
+                    clearWaitStart()
                     Log.i(TAG, "model loaded: ${file.absolutePath} (${file.length() / 1024 / 1024} MB)")
                 }
 
                 is ReadyResult.Failed -> {
                     val why = issueMessage(result.issue)
                     _action.value = OnDeviceUiState.Failed(why)
+                    clearWaitStart()
                     Log.e(TAG, "model load failed: $why")
                 }
             }
@@ -226,11 +266,14 @@ class OnDeviceModelViewModel @Inject constructor(
     fun generate(prompt: String) {
         if (prompt.isBlank()) return
         viewModelScope.launch {
+            // 计时从按下「生成」开始 —— 就绪检查本身可能就是一次几分钟的加载
+            markWaitStart()
             // 先按真实状态确认就绪：没就绪就说没就绪的原因，不显示与状态脱节的旧文案
             val ready = session.ensureReady()
             if (ready is ReadyResult.Failed) {
                 val why = issueMessage(ready.issue)
                 _action.value = OnDeviceUiState.Failed(why)
+                clearWaitStart()
                 Log.w(TAG, "generate blocked: $why")
                 return@launch
             }
@@ -261,8 +304,10 @@ class OnDeviceModelViewModel @Inject constructor(
                     "generate done: firstToken=${if (firstTokenAt == 0L) -1 else firstTokenAt - t0}ms " +
                         "total=${now - t0}ms chunks=$chunks out=${sb.take(120)}"
                 )
+                clearWaitStart()
             } catch (e: Throwable) {
                 _action.value = OnDeviceUiState.Failed("生成失败：${e.message ?: e.javaClass.simpleName}")
+                clearWaitStart()
                 Log.e(TAG, "generate failed", e)
             }
         }
@@ -274,6 +319,7 @@ class OnDeviceModelViewModel @Inject constructor(
         session.unload()
         // 卸载同样交给属主：loadedKey 一清，sessionState 随即变 Idle，这里只撤掉本地动作
         _action.value = null
+        clearWaitStart()
     }
 
     companion object {
@@ -326,6 +372,14 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
     val p = Art.colors
     var prompt by remember { mutableStateOf(DEFAULT_PROMPT) }
 
+    // 阶段来自真实引擎状态：「加载权重」和「解码系统提示」在这里分开显示
+    val enginePhase = rememberUiPhase(viewModel.engineState)
+    val explicitStart by viewModel.waitStart.collectAsStateWithLifecycle()
+    val waiting = state is OnDeviceUiState.Installing ||
+        state is OnDeviceUiState.Loading ||
+        state is OnDeviceUiState.Running
+    val waitStartMs = rememberWaitStart(explicitStart, waiting)
+
     val model by viewModel.modelFile.collectAsStateWithLifecycle()
     val modelLine = when {
         model != null -> "模型：${model!!.name}（${model!!.length() / 1024 / 1024} MB）"
@@ -337,8 +391,13 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
     Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)) {
         ArtActionChip(
             label = when (state) {
-                is OnDeviceUiState.Installing -> "释放中 ${(state.progress * 100).toInt()}%"
-                is OnDeviceUiState.Loading -> "加载中…"
+                // 百分比只在真有分母时给（安装器上报的就是字节比例）
+                is OnDeviceUiState.Installing ->
+                    releasePercent(state.bytes, state.totalBytes)?.let { "释放中 $it%" }
+                        ?: phaseLabel(UiPhase.RELEASING)
+
+                // 不写「加载中…」——阶段名直接用引擎真实状态，用户看得见卡在哪一段
+                is OnDeviceUiState.Loading -> phaseLabel(enginePhase)
                 else -> "加载模型"
             },
             enabled = state !is OnDeviceUiState.Installing &&
@@ -348,7 +407,7 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
         )
         ArtActionChip(
             label = when (state) {
-                is OnDeviceUiState.Running -> "生成中…"
+                is OnDeviceUiState.Running -> phaseLabel(UiPhase.GENERATING)
                 else -> "生成"
             },
             enabled = state !is OnDeviceUiState.Installing &&
@@ -383,21 +442,49 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
     when (state) {
         is OnDeviceUiState.Idle ->
             StatusText("未加载 · 点「加载模型」", p.ink3)
-        is OnDeviceUiState.Installing -> {
-            val pct = if (state.totalBytes > 0) "${(state.progress * 100).toInt()}%" else "…"
-            val mb = if (state.totalBytes > 0) {
-                "${state.bytes / 1024 / 1024} / ${state.totalBytes / 1024 / 1024} MB · "
-            } else ""
-            StatusText("正在释放内置模型 $mb$pct（首次约 1 GB，稍等）", p.accent)
-        }
+        is OnDeviceUiState.Installing ->
+            // 释放有确定分母 → 真进度条（已释放 X / 共 1056 MB），不是转圈
+            ModelProgressView(
+                phase = UiPhase.RELEASING,
+                startedAtMs = waitStartMs,
+                bytesDone = state.bytes,
+                bytesTotal = state.totalBytes,
+                color = p.accent,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
         is OnDeviceUiState.Loading ->
-            StatusText("正在加载模型（首次读 1GB+ 文件，耐心等）…", p.accent)
+            // 阶段来自引擎状态：加载权重 / 解码系统提示 / 卸载…各自给预期时长
+            ModelProgressView(
+                phase = enginePhase,
+                startedAtMs = waitStartMs,
+                color = p.accent,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
         is OnDeviceUiState.Ready ->
             StatusText("已加载 · 可以生成了", p.accent)
+
         is OnDeviceUiState.Running ->
-            StatusText("生成中…", p.accent)
+            // 已用时 + 边生成边上屏的正文；结束后下面的 Done 统计接管
+            ModelProgressView(
+                phase = UiPhase.GENERATING,
+                startedAtMs = waitStartMs,
+                streamingText = state.output,
+                color = p.accent,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
         is OnDeviceUiState.Failed ->
-            StatusText(state.message, p.warn)
+            // 失败三件套：具体原因 + 建议动作（已含在 message 里）+ 重试入口
+            ModelProgressView(
+                phase = UiPhase.IDLE,
+                startedAtMs = null,
+                reason = state.message,
+                onRetry = viewModel::load,
+                color = p.warn,
+                modifier = Modifier.fillMaxWidth(),
+            )
         is OnDeviceUiState.Done -> {
             StatusText(
                 "首 token ${state.firstTokenMs} ms · 全程 ${state.totalMs} ms · " +

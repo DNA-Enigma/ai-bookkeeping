@@ -31,7 +31,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
@@ -39,7 +38,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -68,6 +66,10 @@ import dev.dzsun.bookkeeping.core.database.AccountEntity
 import dev.dzsun.bookkeeping.core.designsystem.BrandBlue
 import dev.dzsun.bookkeeping.core.designsystem.ExpenseOrange
 import dev.dzsun.bookkeeping.core.designsystem.categoryColor
+import dev.dzsun.bookkeeping.llm.ModelProgressView
+import dev.dzsun.bookkeeping.llm.SourceTag
+import dev.dzsun.bookkeeping.llm.UiPhase
+import dev.dzsun.bookkeeping.llm.rememberUiPhase
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -254,6 +256,8 @@ private fun AiCaptureBody(
     viewModel: AddEntryViewModel,
     modifier: Modifier = Modifier,
 ) {
+    // 等待阶段一律从引擎真实状态推导（phaseOf），页面不自己猜，也不写没有计时的「正在识别…」。
+    val enginePhase = rememberUiPhase(viewModel.engineState)
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -262,12 +266,24 @@ private fun AiCaptureBody(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (state.isParsing) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(12.dp))
-                Text("正在识别票据…", style = MaterialTheme.typography.bodyMedium)
-            }
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            // 主路径发的是调度层（DISPATCH，网络往返，没有分母）；
+            // 回落本地解析后阶段换成引擎真实状态（可能正在加载权重/解码系统提示）。
+            ModelProgressView(
+                phase = if (state.parseViaModel) enginePhase else UiPhase.DISPATCH,
+                startedAtMs = state.parseStartedAtMs,
+            )
+        }
+
+        // 规则兜底要说清来源，别让用户以为字段是模型认出来的。
+        // 全文走 [SourceTag.footnote]：**必须带具体原因**（不含原因的
+        // 「没有经过 AI 服务」那类文案会让用户以为功能根本没接入），
+        // 三处入口（问账页脚注 / 对话页气泡 / 这里）同一套口径。
+        state.parseSource?.takeIf { !it.isModel }?.let { tag ->
+            Text(
+                tag.footnote(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         state.pendingClarification?.let { clarification ->

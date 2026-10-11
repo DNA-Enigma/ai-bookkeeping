@@ -33,11 +33,11 @@ constexpr int   OVERFLOW_HEADROOM       = 4;
 constexpr int   BATCH_SIZE              = 512;
 constexpr float DEFAULT_SAMPLER_TEMP    = 0.3f;
 
-static llama_model                      * g_model;
-static llama_context                    * g_context;
-static common_batch                       g_batch;
-static common_chat_templates_ptr          g_chat_templates;
-static common_sampler                   * g_sampler;
+static llama_model                     * g_model     = nullptr;
+static llama_context                   * g_context   = nullptr;
+static common_batch                      g_batch;
+static common_chat_templates_ptr         g_chat_templates;
+static common_sampler                  * g_sampler   = nullptr;
 
 extern "C"
 JNIEXPORT void JNICALL
@@ -507,6 +507,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
         JNIEnv *env,
         jobject /*unused*/
 ) {
+    if (!g_model || !g_context || !g_sampler) {
+        LOGe("%s: Engine not initialized (model=%p, context=%p, sampler=%p)",
+             __func__, (void*)g_model, (void*)g_context, (void*)g_sampler);
+        return nullptr;
+    }
+
     // Infinite text generation via context shifting
     if (current_position >= DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM) {
         LOGw("%s: Context full! Shifting...", __func__);
@@ -568,12 +574,15 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, job
     reset_long_term_states();
     reset_short_term_states();
 
-    // Free up resources
+    // Free up resources and null out pointers to prevent use-after-free
     common_sampler_free(g_sampler);
+    g_sampler = nullptr;
     g_chat_templates.reset();
     g_batch = common_batch();
     llama_free(g_context);
+    g_context = nullptr;
     llama_model_free(g_model);
+    g_model = nullptr;
 }
 
 extern "C"

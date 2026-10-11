@@ -161,10 +161,17 @@ fun AppNavHost(onSignOut: () -> Unit = {}) {
                     )
                 }
                 composable(Routes.CHAT) {
-                    ChatScreen(onClose = { navController.popBackStack() })
+                    ChatScreen(
+                        onClose = { navController.popBackStack() },
+                        onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    )
                 }
                 composable(Routes.ASK) {
-                    AskScreen(onBack = { navController.popBackStack() })
+                    AskScreen(
+                        onBack = { navController.popBackStack() },
+                        // 规则兜底时的「去加载模型」——设置页里有那个入口
+                        onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    )
                 }
                 composable(Routes.LEDGER) {
                     LedgerScreen(

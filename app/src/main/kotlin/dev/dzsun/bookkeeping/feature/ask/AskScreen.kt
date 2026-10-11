@@ -38,21 +38,36 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.dzsun.bookkeeping.llm.ModelProgressView
+import dev.dzsun.bookkeeping.llm.SourceTag
+import dev.dzsun.bookkeeping.llm.ThinkingSection
+import dev.dzsun.bookkeeping.llm.UiPhase
+import dev.dzsun.bookkeeping.llm.rememberUiPhase
 
 /**
  * 问账：「这个月花了多少」「星巴克花了几次」。
  *
  * 界面只负责**收一句话、把答案摆出来**。判定、算术、措辞分别在
- * `LedgerQueryClient` / `LedgerQueryRunner` / `AskAnswerFormatter` 三处，
+ * [ModelQueryJudge] / `LedgerQueryRunner` / `AskAnswerFormatter` 三处，
  * 这一层一行判断逻辑都没有——那正是它不该有的东西。
+ *
+ * 两处界面上的硬要求：
+ * 1. **来源必须写在用户看得见的地方**（`src=MODEL` / `src=RULES`）。规则兜底时
+ *    还要给一个「去加载模型」的入口——只说「按规则处理」而不给下一步，等于告诉用户
+ *    功能坏了。[onOpenSettings] 就是那个入口。
+ * 2. **生成期间整页不许抖**。思考内容存在 [dev.dzsun.bookkeeping.llm.ThinkingUiState]
+ *    里、只由 [ThinkingSection] 自己读，这一层不碰它的文本——见那个类的注释。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AskScreen(
     onBack: () -> Unit,
+    onOpenSettings: () -> Unit = {},
     viewModel: AskViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // 等待阶段必须来自引擎真实状态，问账页不自己写「AI 思考中…」。
+    val enginePhase = rememberUiPhase(viewModel.engineState)
 
     Scaffold(
         topBar = {
@@ -75,7 +90,7 @@ fun AskScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(
-                "用一句话问账本。判定交给 AI 服务，算术在本机做——账目不出设备。",
+                "用一句话问账本。判定交给本机模型（离线），算术在本机做——账目不出设备。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -96,7 +111,7 @@ fun AskScreen(
             )
 
             // 不知道该问什么的时候，给几句现成的。它们是界面文案，不是关键词表——
-            // 点一下只是把字填进输入框，判定仍然全部走调度层。
+            // 点一下只是把字填进输入框，判定仍然全部走本机模型。
             if (state.stage == AskStage.Idle) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -137,10 +152,27 @@ fun AskScreen(
                 }
             }
 
+            // 思考过程：默认收起，点开是**局部滚动区**，不参与整页布局。
+            // 一个字都没产出时整块不出现（那时 ModelProgressView 已经在说阶段了）。
+            if (state.thinking.text.isNotEmpty()) {
+                ThinkingSection(
+                    state = state.thinking,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             when (val stage = state.stage) {
-                is AskStage.Answered -> AnswerCard(stage.answer)
+                is AskStage.Answered -> AnswerCard(stage.answer, stage.source, onOpenSettings)
                 is AskStage.Unavailable -> UnavailableCard(stage)
-                AskStage.Idle, AskStage.Interpreting -> Unit
+
+                // 等待态：阶段 + 已用时 + 预期提示。阶段来自引擎真实状态，
+                // 问账页不自己写「AI 思考中…」。
+                AskStage.Interpreting -> ModelProgressView(
+                    phase = if (state.usesModel) enginePhase else UiPhase.DISPATCH,
+                    startedAtMs = state.waitStart,
+                )
+
+                AskStage.Idle -> Unit
             }
 
             Spacer(Modifier.height(24.dp))
@@ -149,7 +181,7 @@ fun AskScreen(
 }
 
 @Composable
-private fun AnswerCard(answer: AskAnswer) {
+private fun AnswerCard(answer: AskAnswer, source: SourceTag, onOpenSettings: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -186,6 +218,20 @@ private fun AnswerCard(answer: AskAnswer) {
                     note,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                )
+            }
+            // 规则兜底时给下一步：只说「模型未接上」而不给入口，
+            // 用户除了重问一次没有别的办法。
+            if (!source.isModel) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "去加载模型",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier
+                        .clickable(onClick = onOpenSettings)
+                        .padding(vertical = 4.dp),
                 )
             }
         }
@@ -229,8 +275,3 @@ private fun UnavailableCard(stage: AskStage.Unavailable) {
     }
 }
 
-private val EXAMPLE_QUESTIONS = listOf(
-    "这个月花了多少",
-    "星巴克花了几次",
-    "这个月的餐饮花了多少",
-)

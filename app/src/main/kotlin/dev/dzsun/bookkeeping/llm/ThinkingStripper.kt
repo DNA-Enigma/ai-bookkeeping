@@ -12,15 +12,22 @@ package dev.dzsun.bookkeeping.llm
  *  - 另有 `<|...|>` 控制 token，以及模型输出里的 ``` 围栏
  *
  * 处理规则：
- *  - **思考段**：标记与其内容一律丢弃——用户要的是答案，不是推理过程
+ *  - **思考段**：标记本身丢弃，内容**从正文里剔掉**，但可以用 [onThought] 收走 ——
+ *    它是「思考过程」折叠区的素材（需求 C：「含被 ThinkingStripper 剔掉的碎碎念」）。
+ *    不传回调就是老行为：整段丢掉。
  *  - **`<|...|>` 控制 token**：整个丢弃
  *  - **``` 围栏**：只丢标记和语言标签（```json → 丢 `json`），**保留代码内容**
  *    （账单 JSON 全靠这块内容，删了就解析不了）
  *
  * 流式要点：chunk 可能正好切在标记中间（比如 `<th` + `ink>`），
  * 所以在没看到标记结尾之前，不能把可能属于标记的尾巴吐出去。
+ *
+ * @param onThought 思考段原文的去处（**可能与正文交替、分多次调用**）。
+ *   默认 null = 原样丢弃。注意它会在 [feed] / [flush] 内被同步调用，
+ *   所以回调里**不要**再去驱动一个 Flow —— 见 [SparkLlm.generateChunks] 的做法：
+ *   回调只往队列里塞，由外层 Flow 按顺序发射。
  */
-class ThinkingStripper {
+class ThinkingStripper(private val onThought: ((String) -> Unit)? = null) {
 
     private enum class Mode { TEXT, THINK }
 
@@ -50,15 +57,24 @@ class ThinkingStripper {
                 val s = pending.toString()
                 val end = s.indexOf(THINK_END)
                 if (end >= 0) {
+                    thought(s.substring(0, end))
                     pending.delete(0, end + THINK_END.length)
                     mode = Mode.TEXT
                     skipLeadingWs = true
                     continue
                 }
                 if (final) {
-                    pending.setLength(0)          // 没等到结束标记 → 整段思考丢弃
+                    // 没等到结束标记 → 正文里丢掉，但思考素材照给
+                    thought(s)
+                    pending.setLength(0)
                 } else {
-                    holdBack(THINK_END.length - 1) // 只留可能属于结束标记的尾巴
+                    // 只留可能属于结束标记的尾巴，其余作为思考素材先报出去
+                    val hold = THINK_END.length - 1
+                    val safe = (s.length - hold).coerceAtLeast(0)
+                    if (safe > 0) {
+                        thought(s.substring(0, safe))
+                        pending.delete(0, safe)
+                    }
                 }
                 break
             }
@@ -153,10 +169,9 @@ class ThinkingStripper {
         if (start < text.length) out.append(text, start, text.length)
     }
 
-    /** 保留最后 n 个字符（它们可能是某个标记被切断的开头）。 */
-    private fun holdBack(n: Int) {
-        if (n <= 0 || pending.length <= n) return
-        pending.delete(0, pending.length - n)
+    /** 交出一段思考素材。空串不打扰回调方（省掉一次无意义的状态写入）。 */
+    private fun thought(text: String) {
+        if (text.isNotEmpty()) onThought?.invoke(text)
     }
 
     /**

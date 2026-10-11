@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,10 +63,17 @@ import dev.dzsun.bookkeeping.core.designsystem.*
 import dev.dzsun.bookkeeping.feature.ask.AskStage
 import dev.dzsun.bookkeeping.feature.ask.AskViewModel
 import dev.dzsun.bookkeeping.feature.entry.AddEntryViewModel
-import dev.dzsun.bookkeeping.feature.entry.ParseSource
+import dev.dzsun.bookkeeping.llm.SourceTag
+import dev.dzsun.bookkeeping.llm.ThinkingSection
+import dev.dzsun.bookkeeping.llm.ThinkingUiState
+import dev.dzsun.bookkeeping.llm.ModelProgressLine
+import dev.dzsun.bookkeeping.llm.SparkSession
+import dev.dzsun.bookkeeping.llm.UiPhase
+import dev.dzsun.bookkeeping.llm.rememberUiPhase
 import java.time.LocalDate
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * ============================================================
@@ -88,23 +96,32 @@ import kotlinx.coroutines.launch
 data class ParsedEntry(val category: String, val note: String, val amountText: String)
 
 sealed class ChatMsg {
-    data class Text(val fromAgent: Boolean, val body: String) : ChatMsg()
+    /**
+     * [source] 非空且不是模型时，气泡下面挂一行来源脚注（含 `src=RULES` 与「去加载模型」），
+     * **不带原因的「没有经过 AI 服务」不许再出现**——用户要能看出这次为什么不是模型答的。
+     */
+    data class Text(
+        val fromAgent: Boolean,
+        val body: String,
+        val source: SourceTag? = null,
+    ) : ChatMsg()
 
     /**
      * [raw] 是用户原话，「修改」时回填输入框用。
-     * [source] 是这张卡的来源：模型给的数组走 [ParseSource.MODEL]，
-     * 模型只回了一句话、由本地规则补出来的卡走 [ParseSource.RULES]（卡上标「规则解析」）。
+     * [source] 是这张卡的来源：模型给的数组走 [SourceTag.Model]，
+     * 模型只回了一句话、由本地规则补出来的卡走 [SourceTag.rules]（卡上标出来）。
      */
     data class EntryCard(
         val entry: ParsedEntry,
         val raw: String,
-        val source: ParseSource = ParseSource.MODEL,
+        val source: SourceTag = SourceTag.Model,
     ) : ChatMsg()
 }
 
 @Composable
 fun ChatScreen(
     onClose: () -> Unit,
+    onOpenSettings: () -> Unit = {},
     viewModel: AskViewModel = hiltViewModel(),
     addEntryViewModel: AddEntryViewModel = hiltViewModel(),
 ) {
@@ -117,19 +134,42 @@ fun ChatScreen(
     var typing by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
 
-    /**
-     * 模型还在初始化（首次冷启动系统提示解码实测 97~100s）。
-     * 头部状态行据此说「还在准备」，而不是让用户对着打字气泡干等、
-     * 最后只得到一句失败。
-     */
-    var preparing by remember { mutableStateOf(false) }
-
     // 本地模型单例（EntryPoint 取，不能自己 new —— 会绕过单例导致重复加载模型）。
     // LocalContext 必须在 remember **外面**读：lambda 不是 @Composable 作用域。
     val appContext = LocalContext.current
     val azhang = remember {
         EntryPointAccessors.fromApplication(appContext, ChatAiEntryPoint::class.java).azhangChat()
     }
+
+    /**
+     * 本轮在等本机模型：[waitStart] 是按下发送的那一刻（`SystemClock.elapsedRealtime()`），
+     * 阶段由引擎真实状态实时推导（`enginePhase`）。两者合起来就是气泡里的
+     * 「解码系统提示 · 已用 1 分 12 秒」——不再是让用户对着三个点干等。
+     */
+    var modelWait by remember { mutableStateOf(false) }
+    var waitStart by remember { mutableStateOf<Long?>(null) }
+    val enginePhase = rememberUiPhase(azhang.engineState)
+
+    /** 流式草稿：边生成边显示，收尾时被最终结果替换掉。 */
+    var liveReply by remember { mutableStateOf("") }
+
+    /**
+     * 「思考过程」折叠区的状态 —— **独立的一份**，只有 [ThinkingSection] 读它。
+     * 正文草稿（[liveReply]）与思考素材走两条通道，模型每吐一块不会重排整页。
+     */
+    val thinking = remember { ThinkingUiState() }
+
+    /**
+     * 思考区这一轮要不要显示。
+     *
+     * 单独一个布尔量是因为它写在 `LazyColumn { }` 的**非 composable 作用域**里：
+     * 在那里直接读 `thinking.startedAtMs` 会让整个列表内容失效（正是要避免的抖动）。
+     * 它一轮只翻转两次（开始/结束），代价可以忽略。
+     */
+    var thinkingOn by remember { mutableStateOf(false) }
+
+    /** 上一轮失败的原话 —— 「重试」chip 重发它，而不是让用户重新打一遍。 */
+    var retryText by remember { mutableStateOf("") }
 
     fun scroll() {
         scope.launch {
@@ -138,12 +178,12 @@ fun ChatScreen(
         }
     }
 
-    fun agentSay(body: String, delayMs: Long = 800) {
+    fun agentSay(body: String, delayMs: Long = 800, source: SourceTag? = null) {
         scope.launch {
             typing = true; scroll()
             delay(delayMs)
             typing = false
-            messages += ChatMsg.Text(true, body); scroll()
+            messages += ChatMsg.Text(true, body, source); scroll()
         }
     }
 
@@ -172,7 +212,7 @@ fun ChatScreen(
         }
     }
 
-    fun entryParse(raw: String, amountText: String) {
+    fun entryParse(raw: String, amountText: String, source: SourceTag) {
         scope.launch {
             typing = true; scroll()
             delay(900)
@@ -180,7 +220,9 @@ fun ChatScreen(
             val cat = guessCategory(raw)
             val note = raw.replace(Regex("[，,]?\\s*\\d+(?:\\.\\d+)?\\s*"), "")
                 .replace(Regex("花了|花|了"), "").trim().ifEmpty { "未备注" }
-            messages += ChatMsg.EntryCard(ParsedEntry(cat, note, amountText), raw); scroll()
+            // 金额取原文那份（amountText），**不用模型的**——这条路上模型没给出可信金额
+            messages += ChatMsg.EntryCard(ParsedEntry(cat, note, amountText), raw, source)
+            scroll()
         }
     }
 
@@ -207,18 +249,23 @@ fun ChatScreen(
         }
     }
 
-    /** 模型不可用时的原逻辑：分类、寒暄、建议全部退回规则，保证永远有回应。 */
-    fun legacyReply(text: String, intent: ChatIntent) {
+    /**
+     * 模型不可用时的原逻辑：分类、寒暄、建议全部退回规则，保证永远有回应。
+     * [source] 是这一轮为什么走了规则（带原因与代码），会挂在气泡下面。
+     */
+    fun legacyReply(text: String, intent: ChatIntent, source: SourceTag) {
         when (intent) {
             ChatIntent.Advice -> agentSay(
                 "省钱这事得看你的真实账目，我不编数字。\n" +
                     "试着问：「这个月餐饮花了多少」「哪类花得最多」，我看完再一起想办法。",
                 900,
+                source,
             )
 
-            is ChatIntent.Record -> entryParse(text, intent.amountText)
-            is ChatIntent.SmallTalk -> agentSay(intent.reply, 600)
-            is ChatIntent.Ask -> {} // Ask 在 userSay 里已接管，不会走到这里
+            is ChatIntent.Record -> entryParse(text, intent.amountText, source)
+            is ChatIntent.SmallTalk -> agentSay(intent.reply, 600, source)
+            // Ask 在 userSay 里已接管；真走到这里也如实说明这次是规则答的
+            is ChatIntent.Ask -> agentSay(CHAT_FAILED_TEXT, 600, source)
         }
     }
 
@@ -238,28 +285,100 @@ fun ChatScreen(
         // 模型不可用时退回原来的规则判断与话术，聊天页不能哑掉。
         scope.launch {
             typing = true; scroll()
-            preparing = !azhang.isReady
-            val turn = azhang.turn(text)
-            preparing = false
-            typing = false
-            when (turn) {
-                is AzhangTurn.Entry -> {
-                    val e = turn.entries.first()
+            retryText = ""
+            liveReply = ""
+            modelWait = true
+            waitStart = SystemClock.elapsedRealtime()
+
+            // 含金额的句子（chips 里的「午饭花了 35」就是这一类）**优先走记账解析链路**：
+            // 同一个模型、同一份系统提示，但走 MODE_PARSE 那条实测 5/5 全对的路，
+            // 且金额保真与规则兜底都在那一条里（见 AzhangChat.parseEntry）。
+            if (intent is ChatIntent.Record) {
+                val outcome = runCatching { azhang.parseEntry(text) }.getOrNull()
+                if (outcome != null && outcome.entries.isNotEmpty()) {
+                    modelWait = false; typing = false
+                    val e = outcome.entries.first()
                     messages += ChatMsg.EntryCard(
                         ParsedEntry(e.categoryName, e.note.ifBlank { text }, e.amountText),
                         text,
+                        source = outcome.source,
                     )
-                    if (turn.entries.size > 1) {
-                        messages += ChatMsg.Text(true, "识别到 ${turn.entries.size} 笔，先记第一笔，其余的再补。")
+                    if (outcome.entries.size > 1) {
+                        messages += ChatMsg.Text(
+                            true,
+                            "识别到 ${outcome.entries.size} 笔，先记第一笔，其余的再补。",
+                        )
+                    }
+                    scroll()
+                    return@launch
+                }
+                // 认不出账目 → 落回对话链路，别让用户对着一句「没听懂」干等
+            }
+
+            thinking.start(waitStart!!)
+            thinkingOn = true
+
+            // 流式一轮：边生成边把正文上屏（[AzhangStream.Text]），
+            // 超时预算沿用统一的两个分段预算之和，不新造第四个数字。
+            var finish: AzhangTurn? = null
+            val ok = withTimeoutOrNull(CHAT_TURN_BUDGET_MS) {
+                azhang.streamTurn(text).collect { ev ->
+                    when (ev) {
+                        is AzhangStream.Preparing -> Unit
+
+                        // 思考素材：只喂折叠区，正文气泡与输入框都不参与重组
+                        is AzhangStream.Thinking ->
+                            thinking.append(ev.delta, SystemClock.elapsedRealtime())
+
+                        is AzhangStream.Text -> {
+                            val first = liveReply.isEmpty()
+                            liveReply += ev.delta
+                            if (first) scroll()
+                        }
+
+                        is AzhangStream.Finish -> finish = ev.turn
+                    }
+                }
+                true
+            } == true
+
+            modelWait = false
+            typing = false
+            thinking.finish(SystemClock.elapsedRealtime())
+            val draft = liveReply
+            liveReply = ""
+            // finish 在闭包里被赋值过，Kotlin 不允许对它做智能转换 —— 拷成本地不可变引用
+            val result = finish
+            when {
+                // 超时：已经吐出来的部分留着，一个字都没出才说超时（并分清「还在准备」和「真出不来」）
+                !ok -> {
+                    retryText = text
+                    val reason = if (azhang.isReady) CHAT_GEN_TIMEOUT_TEXT else CHAT_PREPARING_TIMEOUT_TEXT
+                    messages += ChatMsg.Text(
+                        true,
+                        if (draft.isEmpty()) reason else "$draft\n\n—— $reason",
+                        source = SourceTag.rulesNotReady(reason, SourceTag.CODE_BAD_OUTPUT),
+                    )
+                }
+
+                result is AzhangTurn.Entry -> {
+                    val e = result.entries.first()
+                    messages += ChatMsg.EntryCard(
+                        ParsedEntry(e.categoryName, e.note.ifBlank { text }, e.amountText),
+                        text,
+                        source = result.source,
+                    )
+                    if (result.entries.size > 1) {
+                        messages += ChatMsg.Text(true, "识别到 ${result.entries.size} 笔，先记第一笔，其余的再补。")
                     }
                 }
 
-                is AzhangTurn.Reply -> {
+                result is AzhangTurn.Reply -> {
                     // 模型那句话照常显示；它没给数组时，保底规则补出来的卡片跟在后面
                     // （见 withRulesEntryFallback）——这样「账一定记得上」不依赖模型守约。
-                    messages += ChatMsg.Text(true, turn.body)
-                    if (turn.entries.isNotEmpty()) {
-                        val e = turn.entries.first()
+                    messages += ChatMsg.Text(true, result.body)
+                    if (result.entries.isNotEmpty()) {
+                        val e = result.entries.first()
                         messages += ChatMsg.EntryCard(
                             entry = ParsedEntry(
                                 category = e.categoryName,
@@ -267,22 +386,24 @@ fun ChatScreen(
                                 amountText = e.amountText,
                             ),
                             raw = text,
-                            source = ParseSource.RULES,
+                            // 保底补出来的卡来源是规则（带原因与代码），卡上要标出来
+                            source = result.entriesSource ?: SourceTag.Model,
                         )
-                        if (turn.entries.size > 1) {
-                            messages += ChatMsg.Text(true, "识别到 ${turn.entries.size} 笔，先记第一笔，其余的再补。")
+                        if (result.entries.size > 1) {
+                            messages += ChatMsg.Text(true, "识别到 ${result.entries.size} 笔，先记第一笔，其余的再补。")
                         }
                     }
                 }
 
-                is AzhangTurn.Unavailable -> {
-                    // 降级回答照旧给（规则识别/寒暄话术），但**原因也要摆出来**——
-                    // reason 已经是「是什么 + 下一步」的中文，原样透出即可。
-                    legacyReply(text, intent)
-                    if (turn.reason.isNotBlank()) {
-                        messages += ChatMsg.Text(true, "本机模型这次没接上：${turn.reason}")
-                        scroll()
-                    }
+                else -> {
+                    // 降级回答照旧给（规则识别/寒暄话术），但**来源与原因都要摆出来**：
+                    // 统一走 SourceTag 的脚注（含 src=RULES 与代码），气泡下面还能点「去加载模型」。
+                    retryText = text
+                    val reason = (result as? AzhangTurn.Unavailable)
+                        ?.reason?.takeIf { it.isNotBlank() } ?: CHAT_FAILED_TEXT
+                    val tag = SourceTag.rules(reason, (result as? AzhangTurn.Unavailable)?.code)
+                    legacyReply(text, intent, tag)
+                    scroll()
                 }
             }
             scroll()
@@ -309,11 +430,21 @@ fun ChatScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(p.pos))
                     Spacer(Modifier.width(6.dp))
-                    Text(
-                        if (preparing) "模型准备中（首次约 1~2 分钟）" else "贴心管家 · 在线",
-                        style = TextStyle(fontSize = 11.sp, letterSpacing = 1.sp),
-                        color = if (preparing) p.accent else p.ink3,
-                    )
+                    if (modelWait) {
+                        // 阶段 + 已用时，来自引擎真实状态（加载权重 / 解码系统提示 / 生成）
+                        ModelProgressLine(
+                            phase = enginePhase,
+                            startedAtMs = waitStart,
+                            showHint = false,
+                            color = p.accent,
+                        )
+                    } else {
+                        Text(
+                            "贴心管家 · 在线",
+                            style = TextStyle(fontSize = 11.sp, letterSpacing = 1.sp),
+                            color = p.ink3,
+                        )
+                    }
                 }
             }
             Spacer(Modifier.weight(1f))
@@ -338,7 +469,7 @@ fun ChatScreen(
         ) {
             items(messages) { msg ->
                 when (msg) {
-                    is ChatMsg.Text -> TextBubble(msg.fromAgent, msg.body)
+                    is ChatMsg.Text -> TextBubble(msg.fromAgent, msg.body, msg.source, onOpenSettings)
                     is ChatMsg.EntryCard -> EntryBubble(
                         entry = msg.entry,
                         source = msg.source,
@@ -351,10 +482,27 @@ fun ChatScreen(
                     )
                 }
             }
-            if (typing) item { TypingBubble() }
+            // 思考过程：默认收起一行摘要，展开是局部滚动区。
+            // 进来的只有 [ThinkingUiState] 这一个稳定对象 —— 内容在组件内部读，
+            // 所以模型每吐一块只重组这一项，气泡/输入框/chips 都不跟着重排。
+            if (thinkingOn) item { ThinkingSection(thinking) }
+
+            // 流式草稿：生成中的正文逐字上屏，不等终态一次出
+            if (liveReply.isNotEmpty()) item { TextBubble(true, liveReply) }
+            if (typing) item {
+                when {
+                    // 等本机模型 → 阶段 + 已用时（不是三个点干等）
+                    modelWait -> WaitBubble(enginePhase, waitStart)
+
+                    // 问账链路 → 已经交给 AI 服务判定，也给阶段 + 已用时
+                    askState.stage is AskStage.Interpreting -> WaitBubble(UiPhase.DISPATCH, askState.waitStart)
+
+                    else -> TypingBubble()
+                }
+            }
         }
 
-        /* 建议问题 */
+        /* 建议问题（失败后第一个是「重试」，重发上一条原话） */
         Row(
             Modifier
                 .fillMaxWidth()
@@ -362,6 +510,9 @@ fun ChatScreen(
                 .padding(horizontal = 20.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (retryText.isNotEmpty()) {
+                ArtChip("重试", selected = false, onClick = { userSay(retryText) })
+            }
             listOf("午饭花了 35", "这个月餐饮花了多少", "这个月咖啡多少钱", "给我省钱建议").forEach { q ->
                 ArtChip(q, selected = false, onClick = { userSay(q) })
             }
@@ -415,27 +566,51 @@ fun ChatScreen(
 /* ---------------- 气泡 ---------------- */
 
 @Composable
-private fun TextBubble(fromAgent: Boolean, body: String) {
+private fun TextBubble(
+    fromAgent: Boolean,
+    body: String,
+    source: SourceTag? = null,
+    onOpenSettings: () -> Unit = {},
+) {
     val p = Art.colors
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromAgent) Arrangement.Start else Arrangement.End) {
         if (fromAgent) { SealBadge("账", size = 28.dp); Spacer(Modifier.width(10.dp)) }
-        Box(
-            Modifier
-                .widthIn(max = 300.dp)
-                .clip(RoundedCornerShape(p.radiusL))
-                .background(if (fromAgent) p.card else (if (p.dark) p.accent else p.ink))
-                .then(
-                    if (fromAgent && Art.style != ArtStyle.MINIMAL)
-                        Modifier.border(1.dp, p.line, RoundedCornerShape(p.radiusL))
-                    else Modifier
+        Column(Modifier.widthIn(max = 300.dp)) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(p.radiusL))
+                    .background(if (fromAgent) p.card else (if (p.dark) p.accent else p.ink))
+                    .then(
+                        if (fromAgent && Art.style != ArtStyle.MINIMAL)
+                            Modifier.border(1.dp, p.line, RoundedCornerShape(p.radiusL))
+                        else Modifier
+                    )
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                Text(
+                    body,
+                    style = TextStyle(fontSize = 14.sp, lineHeight = 24.sp, fontFamily = Art.type.body),
+                    color = if (fromAgent) p.ink else (if (p.dark) Color(0xFF131109) else p.bg),
                 )
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-        ) {
-            Text(
-                body,
-                style = TextStyle(fontSize = 14.sp, lineHeight = 24.sp, fontFamily = Art.type.body),
-                color = if (fromAgent) p.ink else (if (p.dark) Color(0xFF131109) else p.bg),
-            )
+            }
+            // 来源脚注：**只在这一轮没走模型时出现**。
+            // 文案统一由 SourceTag 出（含具体原因与代码），界面不另编一句——
+            // 「没有经过 AI 服务」那种不带原因的说法在这里构造不出来。
+            if (source != null && !source.isModel) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    source.footnote(),
+                    style = TextStyle(fontSize = 11.sp, lineHeight = 16.sp),
+                    color = p.ink3,
+                )
+                Text(
+                    "去加载模型",
+                    style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Medium),
+                    color = p.accent,
+                    modifier = Modifier.clickable(onClick = onOpenSettings).padding(top = 2.dp),
+                )
+            }
         }
     }
 }
@@ -445,7 +620,7 @@ private fun EntryBubble(
     entry: ParsedEntry,
     onConfirm: () -> Unit,
     onEdit: () -> Unit,
-    source: ParseSource = ParseSource.MODEL,
+    source: SourceTag = SourceTag.Model,
 ) {
     val p = Art.colors
     // 按过任一按钮就锁住：既不能再点「确认入账」，也不能重复点「修改」。
@@ -475,7 +650,11 @@ private fun EntryBubble(
                 // 来源标进卡片：规则补出来的卡要让用户看得见，别当成模型认出来的
                 val tags = buildList {
                     add(entry.category); add(entry.note); add("今天")
-                    if (source == ParseSource.RULES) add("规则解析")
+                    // 规则兜底补出来的卡要让用户看得见来源与代码，别当成模型认出来的
+                    if (!source.isModel) {
+                        add(source.shortLabel)
+                        source.code?.let(::add)
+                    }
                 }
                 tags.forEach { tag ->
                     Box(Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, p.line, RoundedCornerShape(999.dp)).padding(horizontal = 12.dp, vertical = 4.dp)) {
@@ -536,6 +715,54 @@ private fun TypingBubble() {
         }
     }
 }
+
+/**
+ * 等待气泡：外形同 [TypingBubble]，内容换成**阶段 + 已用时 + 预期提示**。
+ * 阶段由调用方从真实状态推导（`phaseOf(engineState)` / 已知的调度阶段），这里只负责显示，
+ * 所以对话页、问账页看到的文案是同一套，不会各写各的。
+ */
+@Composable
+private fun WaitBubble(phase: UiPhase, startedAtMs: Long?) {
+    val p = Art.colors
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        SealBadge("账", size = 28.dp)
+        Spacer(Modifier.width(10.dp))
+        Column(
+            Modifier
+                .widthIn(max = 300.dp)
+                .clip(RoundedCornerShape(p.radiusL))
+                .background(p.card)
+                .border(1.dp, p.line, RoundedCornerShape(p.radiusL))
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            ModelProgressLine(phase = phase, startedAtMs = startedAtMs, color = p.ink2)
+        }
+    }
+}
+
+/**
+ * 本轮超时 = 加载预算 + 生成预算 —— **只引用，不定义**。
+ * `PANEL_TURN_BUDGET_MS` 已经是这两个分段预算之和（见 AiFloatPanel.kt），
+ * 对话页和面板走的是同一条链，必须用同一个数。
+ */
+private val CHAT_TURN_BUDGET_MS = PANEL_TURN_BUDGET_MS
+
+/** 整轮超过预算、一个字都没吐出来的失败文案：**原因 + 下一步**（重试入口是下面的「重试」chip）。 */
+private val CHAT_GEN_TIMEOUT_TEXT =
+    "这次生成超时了（超过 ${SparkSession.GEN_BUDGET_MS / 1000} 秒没出结果）。\n" +
+        "可以在下面点「重试」再发一次。"
+
+/**
+ * 同样是超时，但模型**还在初始化**（首次冷启动实测 267 秒）——
+ * 必须和上面那句分开：这不是「答不上来」，是「还在准备」。
+ */
+private val CHAT_PREPARING_TIMEOUT_TEXT =
+    "模型还在准备（首次约 4 分钟），这次没等到它就绪。\n" +
+        "可以在下面点「重试」再发一次。"
+
+/** 连原因都没拿到时的兜底：仍然带上「下一步做什么」，不写一句孤零零的「失败」。 */
+private const val CHAT_FAILED_TEXT =
+    "这次没答上。\n可以在下面点「重试」再发一次。"
 
 /** 演示用类目猜测（TODO 换 feature/entry 的 AiParser） */
 private fun guessCategory(text: String): String = when {

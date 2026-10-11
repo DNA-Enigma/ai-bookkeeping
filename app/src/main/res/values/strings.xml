@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AI 记账</string>
+
+    <!-- 模型后台任务通知渠道（ModelWorkService / NotificationGate） -->
+    <string name="notif_channel_work_name">本机模型任务进行中</string>
+    <string name="notif_channel_work_desc">释放模型资产、加载模型、生成回答期间的进度提醒</string>
+    <string name="notif_channel_result_name">本机模型任务结果</string>
+    <string name="notif_channel_result_desc">回答已生成、模型已就绪或失败原因</string>
 </resources>

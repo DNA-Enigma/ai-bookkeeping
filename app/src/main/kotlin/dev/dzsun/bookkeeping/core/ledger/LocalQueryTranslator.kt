@@ -2,10 +2,8 @@ package dev.dzsun.bookkeeping.core.ledger
 
 import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.database.LedgerDatabase
-import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
-import java.time.temporal.TemporalAdjusters
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -101,8 +99,8 @@ internal fun parseQuery(
     val merchant = extractSubject(remainder)
 
     return LedgerQuery(
-        fromEpochDay = range?.from,
-        toEpochDay = range?.to,
+        fromEpochDay = range?.first,
+        toEpochDay = range?.last,
         direction = direction ?: QueryDirection.EXPENSE,
         categoryName = category,
         merchant = merchant,
@@ -136,75 +134,37 @@ private fun matchDirection(text: String): QueryDirection? {
 // —— 时间 ——
 
 /** 一段闭区间，单位为 epoch day，与 `journal.dateEpochDay` 同一口径。 */
-private data class Range(val from: Long, val to: Long)
+private typealias Range = LongRange
 
 /** `近三个月` / `最近 7 天`。放在固定词表之前，因为它带数字。 */
 private val RELATIVE =
     Regex("(?:最近|近)\\s*([0-9一二三四五六七八九十]+)\\s*(个月|个星期|周|天)")
 
+/**
+ * 认时间范围。
+ *
+ * 带数字的「近 N 天」留在这里（模型的符号词表里没有它，翻不出来会走规则兜底，
+ * 那时正好由这一段接住）；其余固定时间词一律交给 [QueryRange]——
+ * **日期算术只有那一份**，见它的类注释。
+ */
 private fun matchRange(text: String, today: LocalDate): Range? {
     RELATIVE.find(text)?.let { m ->
         val n = parseCount(m.groupValues[1]) ?: return@let
-        return when (m.groupValues[2]) {
+        val from = when (m.groupValues[2]) {
             // 「近 N 天」含今天，所以是 N-1 天前到今天，一共 N 天
-            "天" -> Range(today.minusDays((n - 1).toLong()).toEpochDay(), today.toEpochDay())
+            "天" -> today.minusDays((n - 1).toLong())
             // 「近 N 个月」从 N-1 个月前的 1 号起算——「近三个月」是本月 +
             // 往前两个整月，不是从今天倒推 90 天
-            "个月" -> Range(
-                YearMonth.from(today).minusMonths((n - 1).toLong()).atDay(1).toEpochDay(),
-                today.toEpochDay(),
-            )
-            else -> Range(
-                today.minusWeeks((n - 1).toLong()).toEpochDay(),
-                today.toEpochDay(),
-            )
+            "个月" -> YearMonth.from(today).minusMonths((n - 1).toLong()).atDay(1)
+            else -> today.minusWeeks((n - 1).toLong())
         }
+        return from.toEpochDay()..today.toEpochDay()
     }
 
-    for (rule in FIXED_RANGES) {
-        val hit = firstMatch(text, rule.words) ?: continue
-        return rule.span(today)
-    }
-    return null
+    // 按 [QueryRange] 的声明顺序扫，先命中的整段胜出——各时间词互不为子串，顺序不影响结果
+    val symbol = QueryRange.dated.firstOrNull { range -> firstMatch(text, range.words.toList()) != null }
+    return symbol?.span(today)
 }
-
-/**
- * 固定时间词。
- *
- * **按整段对齐**（周一~周日、1 号~月末、1 月 1 日~12 月 31 日），与
- * `AskAnswerFormatter.describeRange` 认「本月」的口径一致——那边要求
- * `atDay(1)` / `atEndOfMonth()` 完全相等才叫「本月」，这里就得给出那样的两端。
- * 各规则互不为子串，顺序不影响结果。
- */
-private class FixedRange(val words: List<String>, val span: (LocalDate) -> Range)
-
-private fun days(from: LocalDate, to: LocalDate) = Range(from.toEpochDay(), to.toEpochDay())
-
-private val FIXED_RANGES = listOf(
-    FixedRange(listOf("今天", "今日")) { days(it, it) },
-    FixedRange(listOf("昨天", "昨日")) { days(it.minusDays(1), it.minusDays(1)) },
-    FixedRange(listOf("前天")) { days(it.minusDays(2), it.minusDays(2)) },
-    FixedRange(listOf("本周", "这周", "这个星期", "本星期")) {
-        val monday = it.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
-        days(monday, monday.plusDays(6))
-    },
-    FixedRange(listOf("上周", "上个星期", "上星期")) {
-        val monday = it.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).minusWeeks(1)
-        days(monday, monday.plusDays(6))
-    },
-    FixedRange(listOf("这个月", "本月", "当月", "这个月份")) {
-        val m = YearMonth.from(it); days(m.atDay(1), m.atEndOfMonth())
-    },
-    FixedRange(listOf("上个月", "上月")) {
-        val m = YearMonth.from(it).minusMonths(1); days(m.atDay(1), m.atEndOfMonth())
-    },
-    FixedRange(listOf("今年", "本年", "这一年")) {
-        days(it.withDayOfYear(1), it.withDayOfYear(it.lengthOfYear()))
-    },
-    FixedRange(listOf("去年", "上一年")) {
-        val y = it.minusYears(1); days(y.withDayOfYear(1), y.withDayOfYear(y.lengthOfYear()))
-    },
-)
 
 /** 中文数字与阿拉伯数字都认，覆盖 1~99——问账里见不到比这更大的跨度。 */
 private fun parseCount(raw: String): Int? {
@@ -299,7 +259,7 @@ private val MERCHANT_GROUPING = listOf("按商户", "按商家", "各家", "各�
  * 不会报错，只会静默查不到。单字虚词交给 [trimParticles] 只削两端。
  */
 private val REMOVABLE =
-    FIXED_RANGES.flatMap { it.words } +
+    QueryRange.dated.flatMap { it.words.toList() } +
         BOTH_WORDS + INCOME_WORDS + EXPENSE_WORDS + INTERROGATIVES +
         MONTH_GROUPING + CATEGORY_GROUPING + MERCHANT_GROUPING +
         listOf(

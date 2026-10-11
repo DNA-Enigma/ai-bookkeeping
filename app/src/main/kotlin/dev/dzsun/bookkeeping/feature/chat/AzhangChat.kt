@@ -1,16 +1,23 @@
 package dev.dzsun.bookkeeping.feature.chat
 
 import dev.dzsun.bookkeeping.llm.ModelIssue
+import dev.dzsun.bookkeeping.llm.LlmChunk
 import dev.dzsun.bookkeeping.llm.ReadyResult
 import dev.dzsun.bookkeeping.llm.ReplyStreamFilter
+import dev.dzsun.bookkeeping.llm.SourceTag
 import dev.dzsun.bookkeeping.llm.SparkSession
+import dev.dzsun.bookkeeping.llm.ThinkingUiState
 import dev.dzsun.bookkeeping.llm.issueMessage
+import dev.dzsun.bookkeeping.feature.entry.AmountFidelity
+import dev.dzsun.bookkeeping.feature.entry.EntryDecode
 import dev.dzsun.bookkeeping.feature.entry.LocalAiParser
 import dev.dzsun.bookkeeping.feature.entry.SparkAiParser
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.arm.aichat.InferenceEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -23,6 +30,15 @@ import android.util.Log
 sealed interface AzhangStream {
     /** 正在准备模型（首次进入要加载 1GB 模型，先给用户一个状态）。 */
     data object Preparing : AzhangStream
+
+    /**
+     * 一段**思考素材**（含被 ThinkingStripper 剔掉的碎碎念，以及还没解析的正文）。
+     *
+     * 它走的是一条**独立的通道**：调用方把它喂进 `ThinkingUiState`，
+     * 那个折叠区自己去重组。正文气泡、输入框、chips 都不参与——
+     * 这是「整页不许随生成节奏抖动」那条验收的实现方式。
+     */
+    data class Thinking(val delta: String) : AzhangStream
 
     /** 可以立即显示的正文增量。 */
     data class Text(val delta: String) : AzhangStream
@@ -38,7 +54,10 @@ sealed interface AzhangTurn {
      * 类型用的是记一笔那套领域模型（`feature.entry.ParsedEntry`），
      * 这里用全限定名是为了避开聊天页里同名的展示用 `ParsedEntry`。
      */
-    data class Entry(val entries: List<dev.dzsun.bookkeeping.feature.entry.ParsedEntry>) : AzhangTurn
+    data class Entry(
+        val entries: List<dev.dzsun.bookkeeping.feature.entry.ParsedEntry>,
+        val source: SourceTag = SourceTag.Model,
+    ) : AzhangTurn
 
     /**
      * 模型的自然语言回答。
@@ -47,12 +66,16 @@ sealed interface AzhangTurn {
      *
      * [entries] 是**保底补出来的记账卡片**（见 [withRulesEntryFallback]）：
      * 模型明明收到一句报账却只回了一句话时，界面要**既显示这句话、又出卡**，
-     * 否则用户这句话就白说了。恒为 [ParseSource.RULES] 来源，非空时才有效。
+     * 否则用户这句话就白说了。来源恒是 [SourceTag.rules]（带原因），非空时才有效。
      */
     data class Reply(
         val body: String,
         val isLedgerQuery: Boolean = false,
         val entries: List<dev.dzsun.bookkeeping.feature.entry.ParsedEntry> = emptyList(),
+        /** [entries] 的来源；[entries] 为空时无意义。 */
+        val entriesSource: SourceTag? = null,
+        /** 这句话本身的来源，界面按它渲染气泡脚注（`src=MODEL` / `src=RULES`）。 */
+        val source: SourceTag = SourceTag.Model,
     ) : AzhangTurn
 
     /**
@@ -60,8 +83,11 @@ sealed interface AzhangTurn {
      *
      * [reason] 是**给用户看的**：说清是什么 + 下一步做什么（见 `issueMessage`），
      * 界面要原样透出，不要再另编一句与真实原因不符的文案。
+     *
+     * [code] 是机械判据的代码（如 `MODEL_AMOUNT_MISMATCH`），界面拿它拼 [SourceTag]，
+     * 于是气泡与卡片上的来源标注口径完全一致（`src=RULES，<code>`）。
      */
-    data class Unavailable(val reason: String = "") : AzhangTurn
+    data class Unavailable(val reason: String = "", val code: String? = null) : AzhangTurn
 }
 
 /**
@@ -97,6 +123,19 @@ class AzhangChat @Inject constructor(
     private val rulesParser = LocalAiParser()
 
     /**
+     * **记账解析链路**（`MODE_PARSE`）—— 对话页/悬浮面板里含金额的句子优先走这条。
+     *
+     * 为什么不走 [streamTurn] 的 `MODE_CHAT`：那条路模型多半只回一句话
+     * （实测含金额的报账 6/6 次不给数组），卡片要靠规则补，金额也只能取原文那一份。
+     * 而 `MODE_PARSE` 实测 5/5 全对，且**同一份** [SparkAiParser.parseWithSource] 里
+     * 已经串好了金额保真（`MODEL_AMOUNT_MISMATCH`）与规则兜底。
+     *
+     * 两个模式共用同一个系统提示，只在用户消息前缀上分叉 —— **不会触发重新加载模型**。
+     */
+    suspend fun parseEntry(text: String): dev.dzsun.bookkeeping.feature.entry.ParseOutcome =
+        parser.parseWithSource(text)
+
+    /**
      * 预热：进 AI 页面就把模型加载好，别让用户第一条消息先等几十秒。
      * 失败也无所谓 —— 真正调用时还会再试一次，然后走降级。
      */
@@ -107,6 +146,12 @@ class AzhangChat @Inject constructor(
      * 超时的时候如果它还是 false，说明卡在初始化（首次要 1~2 分钟），不是生成失败。
      */
     val isReady: Boolean get() = session.isReady
+
+    /**
+     * 引擎的真实状态 —— 等待可视化用它把「一次等待」切成
+     * 加载权重 / 解码系统提示 / 生成各阶段（推导统一走 `phaseOf`，界面不自己猜）。
+     */
+    val engineState: StateFlow<InferenceEngine.State> get() = session.state
 
     suspend fun turn(
         text: String,
@@ -154,12 +199,18 @@ class AzhangChat @Inject constructor(
     /**
      * 流式一轮对话：**边生成边吐可显示的正文**，悬浮面板实时上屏就靠它。
      *
-     * 顺序：`Preparing`（首次要加载 1GB 模型，先告诉用户在准备）→ 若干 `Text` 增量 →
+     * 顺序：`Preparing`（首次要加载 1GB 模型，先告诉用户在准备）→ 若干 `Thinking`
+     * （思考素材，喂折叠区）+ `Text`（可显示的正文增量，进气泡）→
      * `Finish`（最终是记账卡片、完整回复、还是降级）。
+     *
+     * **`Thinking` 与 `Text` 是两条通道**：前者只喂 `ThinkingUiState`，由折叠区
+     * 自己去重组；后者才改气泡。混成一条的话，模型每吐一个字整页都要重排。
      *
      * **不在这里加超时**：Flow 内部再套 `withTimeoutOrNull` 会触发
      * 「从另一个协程发射」的不变量异常。超时与取消由调用方
      * `withTimeoutOrNull(budget) { azhang.streamTurn(t).collect { … } }` 统一控制。
+     * 
+     * 内部兜底：collect 循环中每收到一个 chunk 检查一次总耗时，防止调用方忘记设超时。
      */
     fun streamTurn(text: String): Flow<AzhangStream> = flow {
         if (text.isBlank()) {
@@ -183,11 +234,21 @@ class AzhangChat @Inject constructor(
 
         val filter = ReplyStreamFilter()
         val raw = StringBuilder()
+        val startTime = android.os.SystemClock.elapsedRealtime()
+        val maxDurationMs = GEN_TIMEOUT_MS
         try {
-            session.stream(SparkSession.MODE_CHAT + text, SparkSession.DEFAULT_MAX_TOKENS)
+            session.streamChunks(SparkSession.MODE_CHAT + text, SparkSession.DEFAULT_MAX_TOKENS)
                 .collect { chunk ->
-                    raw.append(chunk)
-                    val delta = filter.feed(chunk)
+                    // 内部兜底：防止调用方忘记设超时，模型无限挂起
+                    if (android.os.SystemClock.elapsedRealtime() - startTime > maxDurationMs) {
+                        throw java.util.concurrent.TimeoutException("流式生成超过 ${maxDurationMs}ms")
+                    }
+                    // 思考素材走独立通道：含被 ThinkingStripper 剔掉的碎碎念，
+                    // 也含还没解析的正文（用户展开时才看，默认收起）。
+                    emit(AzhangStream.Thinking(chunk.text))
+                    if (chunk !is LlmChunk.Answer) return@collect
+                    raw.append(chunk.text)
+                    val delta = filter.feed(chunk.text)
                     if (delta.isNotEmpty()) emit(AzhangStream.Text(delta))
                 }
             filter.flush().takeIf { it.isNotEmpty() }?.let { emit(AzhangStream.Text(it)) }
@@ -210,15 +271,62 @@ class AzhangChat @Inject constructor(
      * [displayableChatReply]），**解读不了返回 null**——null 交给 [repairChatOutput]
      * 补救重试，不再直接降级（1.7B 模型会吐「（暂无具体对话内容）」这种非 JSON
      * 的原话，见 [repairChatOutput]）。
+     *
+     * [raw] 是用户原话，**必须传**：数组是不是可信要靠它做金额保真校验
+     * （见 [SparkAiParser.decodeChecked]）。少了这一步，模型报的错金额会被静默收下。
+     *
+     * **这个函数保持非挂起**：它作为 `parse` 回调喂给 [repairChatOutput]（纯函数、
+     * 单测直接钉）。金额对不上时它只产出一个带 [SourceTag.CODE_AMOUNT_MISMATCH]
+     * 的 [AzhangTurn.Unavailable] 信号，需要挂起调用的规则兜底由
+     * [interpretRepaired] 在 suspend 链路里接手（见 [amountMismatchFallback]）。
      */
-    private fun interpret(out: String): AzhangTurn? {
-        // 1) 用户其实在报账 → 模型直接给了数组
-        val entries = runCatching { parser.decodeEntries(out) }.getOrNull()
-        if (!entries.isNullOrEmpty()) return AzhangTurn.Entry(entries)
+    private fun interpret(raw: String, out: String): AzhangTurn? {
+        // 1) 用户其实在报账 → 模型直接给了数组（**带金额保真校验**）
+        when (val decoded = runCatching { parser.decodeChecked(raw, out) }.getOrNull()) {
+            is EntryDecode.Ok -> if (decoded.entries.isNotEmpty()) {
+                return AzhangTurn.Entry(decoded.entries)
+            }
+            // 模型报的金额和原话对不上 → 整批作废，就地打出不匹配信号，不再补救重试
+            is EntryDecode.AmountMismatch -> return AzhangTurn.Unavailable(
+                AmountFidelity.describe(decoded.parsed, decoded.expected),
+                SourceTag.CODE_AMOUNT_MISMATCH,
+            )
+            EntryDecode.NoArray, null -> Unit
+        }
 
         // 2) 正常对话：同义字段容错 + 数字护栏（护栏不因为容错而放松）
         return displayableChatReply(out)?.let { chatReply(it) }
     }
+
+    /**
+     * 模型报的金额与用户原话对不上（真机实测：「午餐20元」被报成 30）。
+     *
+     * **整批作废**，不是只改那一笔：一个数字都报不准的批次，其余字段同样不可信。
+     * 然后拿**用户原话**走确定性规则，规则也认不出才如实说这次没答上。
+     *
+     * 为什么不再补救重试一次：规则是确定性的、不花钱也不花时间，而重试要再等一次
+     * 生成，还可能拿到**第二个**错数字。这一条只挡错金额，不指望模型第二次就对了。
+     *
+     * 规则解析是挂起调用（[LocalAiParser.parse] 在 [AiParser] 接口上就是 suspend），
+     * 所以这一层是 suspend，只能从 [interpretRepaired] 的挂起链路进来。
+     */
+    private suspend fun amountMismatchFallback(raw: String, reason: String): AzhangTurn {
+        Log.w(TAG, "金额与原文对不上，模型结果作废（$raw）：$reason")
+        val rules = rulesEntries(raw)
+        return if (rules.isEmpty()) {
+            AzhangTurn.Unavailable(
+                "$reason\n这句也没能按规则认出账目，把金额再说一遍试试。",
+                SourceTag.CODE_AMOUNT_MISMATCH,
+            )
+        } else {
+            AzhangTurn.Entry(rules, SourceTag.rules(reason, SourceTag.CODE_AMOUNT_MISMATCH))
+        }
+    }
+
+    /** 规则兜底出卡：金额必须 > 0 且分类落得进科目表，否则宁可不出卡。 */
+    private suspend fun rulesEntries(raw: String): List<dev.dzsun.bookkeeping.feature.entry.ParsedEntry> =
+        runCatching { rulesParser.parse(raw) }.getOrNull().orEmpty()
+            .filter { it.amountText.toBigDecimalOrNull()?.signum() == 1 && isKnownCategory(it) }
 
     /**
      * 解析 + **输出纠错**：解读不了就用补救提示重发一次（只重试 1 次），
@@ -227,17 +335,20 @@ class AzhangChat @Inject constructor(
      *
      * 只服务 [SparkSession.MODE_CHAT]。记账解析（[SparkSession.MODE_PARSE]）
      * 不经过这里，照旧回落 `LocalAiParser`。
+     *
+     * 金额不匹配的信号在这里转成真正的规则兜底：[repairChatOutput] 是纯函数
+     * （`parse` 回调必须非挂起），所以「拿用户原话走一次挂起的规则解析」
+     * 只能在这一层做（见 [amountMismatchFallback]）。
      */
     private suspend fun interpretRepaired(
         text: String,
         out: String,
         remedyTimeoutMs: Long,
-    ): AzhangTurn = withRulesEntryFallback(
-        text = text,
-        turn = repairChatOutput(
+    ): AzhangTurn {
+        val repaired = repairChatOutput(
             text = text,
             firstOut = out,
-            parse = { interpret(it) },
+            parse = { interpret(text, it) },
             remedy = {
                 withTimeoutOrNull(remedyTimeoutMs) {
                     session.complete(remedyPrompt(text), REMEDY_MAX_TOKENS)
@@ -246,10 +357,22 @@ class AzhangChat @Inject constructor(
             log = { level, message ->
                 if (level == LogLevel.W) Log.w(TAG, message) else Log.i(TAG, message)
             },
-        ),
-        parse = { rulesParser.parse(it) },
-        isKnownCategory = ::isKnownCategory,
-    )
+        )
+        // interpret 对「金额与原文对不上」只打信号；规则兜底是挂起调用，在这里接手
+        val turn = if (repaired is AzhangTurn.Unavailable &&
+            repaired.code == SourceTag.CODE_AMOUNT_MISMATCH
+        ) {
+            amountMismatchFallback(text, repaired.reason)
+        } else {
+            repaired
+        }
+        return withRulesEntryFallback(
+            text = text,
+            turn = turn,
+            parse = { rulesParser.parse(it) },
+            isKnownCategory = ::isKnownCategory,
+        )
+    }
 
     /** 分类必须落得进科目表，否则用户点确认时按名字找不到账户。 */
     private fun isKnownCategory(entry: dev.dzsun.bookkeeping.feature.entry.ParsedEntry): Boolean =
@@ -401,8 +524,8 @@ private fun chatReply(trimmed: String): AzhangTurn.Reply = AzhangTurn.Reply(
  * 三条口径：
  *  1. **模型已经给了数组就不碰规则**（[AzhangTurn.Entry] 原样返回，[parse] 一次都不调）；
  *  2. 金额必须 > 0 且**分类能落进科目表**（[isKnownCategory]），否则不出卡；
- *  3. 来源一律是规则（`ParseSource.RULES`），卡片上要标出来——
- *     别让用户以为字段是模型认出来的。
+ *  3. 卡片的来源标成规则兜底（[SourceTag.rules]，**带原因与代码**），界面上要标出来——
+ *     别让用户以为这些字段是模型认出来的。
  *
  * 解析器与科目表判定都注入，所以单测不需要 Android、不需要引擎。
  */
@@ -417,8 +540,19 @@ internal suspend fun withRulesEntryFallback(
         entry.amountText.toBigDecimalOrNull()?.signum() == 1 && isKnownCategory(entry)
     }
     if (entries.isEmpty()) return turn
-    return turn.copy(entries = entries)
+    return turn.copy(
+        entries = entries,
+        entriesSource = SourceTag.rules(NO_ENTRY_REASON, SourceTag.CODE_NO_ENTRIES),
+    )
 }
+
+/**
+ * 模型回了话却没给记账条目时，卡片上写的兜底原因。
+ *
+ * 这句话会**原样出现在用户眼前**（卡片脚注），所以要说清发生了什么、
+ * 而不是写「规则解析」四个字让用户自己猜。
+ */
+const val NO_ENTRY_REASON = "模型这次只回了一句话，没给出记账条目"
 
 /**
  * 对话输出的解析与纠错：[parse] 解读不了就用 [remedy] 补救重试，

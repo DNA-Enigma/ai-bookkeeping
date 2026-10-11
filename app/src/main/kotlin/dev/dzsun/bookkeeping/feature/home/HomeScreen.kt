@@ -27,7 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import dev.dzsun.bookkeeping.feature.chat.AiFloatPanel
 import androidx.compose.ui.Alignment
@@ -98,7 +98,7 @@ fun HomeScreen(
     val hasAnyLedger = ui.entries.isNotEmpty()
 
     // AI 悬浮面板：点右下角的球原地展开，不再跳页
-    var aiPanel by remember { mutableStateOf(false) }
+    var aiPanel by rememberSaveable { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
     Column(

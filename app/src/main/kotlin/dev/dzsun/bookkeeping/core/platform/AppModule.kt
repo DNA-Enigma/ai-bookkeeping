@@ -42,7 +42,7 @@ object AppModule {
     /**
      * 口语记账解析：**端侧模型为主路径**（赛题硬性要求不走云端）。
      * 模型缺失/超时/输出不合法时，[SparkAiParser] 内部降级到规则版，
-     * 不会让用户记不了账——降级与否由 [dev.dzsun.bookkeeping.feature.entry.ParseSource] 标注。
+     * 不会让用户记不了账——降级与否由 [dev.dzsun.bookkeeping.llm.SourceTag] 标注。
      */
     @Provides
     @Singleton

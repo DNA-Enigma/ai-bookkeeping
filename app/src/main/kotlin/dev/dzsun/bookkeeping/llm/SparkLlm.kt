@@ -2,7 +2,32 @@ package dev.dzsun.bookkeeping.llm
 
 import com.arm.aichat.InferenceEngine
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+
+/**
+ * 流式产出的一块。
+ *
+ * ## 为什么要分两条通道，而不是把思考原文混进正文里
+ *
+ * 需求 C 要的是「思考过程」与「正文」**分开展示**：思考默认收起、正文进气泡。
+ * 如果只给一个 `Flow<String>`，上层就只能自己再跑一遍剔除逻辑去猜哪段是思考——
+ * 那等于把 [ThinkingStripper] 的规则复制到每个调用方。分通道之后，
+ * 剔除规则仍然只有一处（[ThinkingStripper]），调用方只做展示。
+ */
+sealed interface LlmChunk {
+    val text: String
+
+    /** 可展示的正文增量（已剔除思考段与控制 token）。 */
+    data class Answer(override val text: String) : LlmChunk
+
+    /**
+     * 思考段原文 —— 从正文里剔掉了，但**不是垃圾**：
+     * 它是「思考过程」折叠区的素材，也是排查模型为什么答错时唯一的现场。
+     */
+    data class Thought(override val text: String) : LlmChunk
+}
 
 /**
  * 端侧推理的最小可用封装 —— 把官方 `InferenceEngine` 收敛成三件事：
@@ -42,15 +67,40 @@ class SparkLlm(private val engine: InferenceEngine) {
     fun generate(
         prompt: String,
         maxTokens: Int = DEFAULT_MAX_TOKENS,
-    ): Flow<String> = flow {
+    ): Flow<String> = generateChunks(prompt, maxTokens)
+        .filterIsInstance<LlmChunk.Answer>()
+        .map { it.text }
+
+    /**
+     * 发起一轮对话，**思考段与正文分通道**逐块发射 —— 悬浮面板/对话页的
+     * 「思考过程」折叠区与正文气泡都吃这一条。
+     *
+     * ## 为什么思考内容走队列而不是直接回调里 emit
+     *
+     * [ThinkingStripper] 的 `onThought` 是在 [InferenceEngine.sendUserPrompt] 的
+     * collect 内部被同步调用的。在 `flow {}` 里**从回调里直接 `emit`** 会踩
+     * 「Flow invariant is violated：从另一个协程发射」——收不收得到取决于上游
+     * 跑在哪个 context，属于偶发崩溃。所以回调只把文本塞进本地队列，
+     * 由外层 collect 循环按序发射。
+     *
+     * 顺序保证：思考段总是排在它后面那段正文之前（时间顺序），
+     * 折叠区因此不会出现「先看到答案再看到推理」。
+     */
+    fun generateChunks(
+        prompt: String,
+        maxTokens: Int = DEFAULT_MAX_TOKENS,
+    ): Flow<LlmChunk> = flow {
         require(prompt.isNotBlank()) { "prompt 不能为空" }
-        val stripper = ThinkingStripper()
+        val thoughts = ArrayDeque<String>()
+        val stripper = ThinkingStripper { thoughts.addLast(it) }
         engine.sendUserPrompt(prompt, maxTokens).collect { token ->
             val text = stripper.feed(token)
-            if (text.isNotEmpty()) emit(text)
+            while (thoughts.isNotEmpty()) emit(LlmChunk.Thought(thoughts.removeFirst()))
+            if (text.isNotEmpty()) emit(LlmChunk.Answer(text))
         }
         val tail = stripper.flush()
-        if (tail.isNotEmpty()) emit(tail)
+        while (thoughts.isNotEmpty()) emit(LlmChunk.Thought(thoughts.removeFirst()))
+        if (tail.isNotEmpty()) emit(LlmChunk.Answer(tail))
     }
 
     /** 一次性拿完整回答（诊断、脚本化验证用）。 */

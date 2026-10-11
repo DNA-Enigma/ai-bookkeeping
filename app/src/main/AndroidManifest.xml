@@ -4,6 +4,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 侧载自更新：Android 8 起还需用户对本应用单独授权「安装未知应用」 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- 模型长任务（释放 1 GB / 加载 / 生成）切后台继续：前台服务 + 通知栏进度 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14+ 要求前台服务类型与权限配对（dataSync），缺一则 startForeground 抛异常 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+ 运行时权限：被拒绝时功能降级为「页面内可见进度」，不崩 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".BookkeepingApplication"
@@ -24,6 +30,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 模型长任务守护：释放/加载/生成期间切走，通知栏继续说进度。
+             类型 dataSync 与 FOREGROUND_SERVICE_DATA_SYNC 配对（理由见 ModelWorkService 类注释）。 -->
+        <service
+            android:name=".llm.ModelWorkService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- 把缓存里的待安装 APK 以受控 URI 交给系统安装器 -->
         <provider

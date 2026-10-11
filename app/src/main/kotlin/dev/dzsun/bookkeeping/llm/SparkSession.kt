@@ -171,10 +171,14 @@ internal fun shouldClaimInFlight(
  * 所以提示词在这里**算一次**（含从科目表读来的分类枚举），三个调用方一律用 [systemPrompt]，
  * [ensureReady] 不带参数 —— **同一个字符串，永不重载**。
  *
- * ## 两种输出形状靠「用户消息前缀」区分，不靠换提示词
+ * ## 三种输出形状靠「用户消息前缀」区分，不靠换提示词
  *  - [MODE_PARSE] → JSON **数组**（记账抽取；闲聊/查询/转账/退款输出 `[]`）
  *  - [MODE_CHAT]  → 能记账就给数组，否则给 `{"reply":"..."}`；查账类问题 reply 固定为「查账」，
  *                   由上层走**本地账本 SQL**，不让模型编数字。
+ *  - [MODE_QUERY] → 问账判定：`{"intent":"query",…}` 或 `{"intent":"chat"}`。
+ *                   **时间词只出符号名**（`this_month`），日期换算在本地做——
+ *                   让模型算日期实测必错（服务端同一类 bug：提示词没给今天几号，
+ *                   「这个月」被算成上个月）。
  */
 @Singleton
 class SparkSession @Inject constructor(
@@ -187,6 +191,15 @@ class SparkSession @Inject constructor(
     val llm = SparkLlm(engine)
 
     private val mutex = Mutex()
+
+    /**
+     * 串行化 `llm.init / llm.free` 的专用锁 —— **只防并发 init，不负责界面响应**。
+     *
+     * 与 [mutex] 分工见 [ensureReady] 的「锁的两段式」注释：init 要跑 267 秒，
+     * 塞进 mutex 会冻住所有状态查询；但完全不锁又会让第二个调用方 free 掉
+     * 第一个正在跑的 init。锁序恒为 initMutex → mutex。
+     */
+    private val initMutex = Mutex()
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /** 已加载的系统提示；null = 未加载。写它即等于对外广播「加载好了 / 卸掉了」。 */
@@ -236,9 +249,14 @@ class SparkSession @Inject constructor(
                 if (prompt != null &&
                     shouldClaimInFlight(s, promptDispatched, hasInFlight = true, hasKey = loadedKey != null)
                 ) {
-                    loadedKey = prompt
-                    promptDispatched = false
-                    Log.i(TAG, "调用方已取消，属主自行认领提示词（engine=$s）")
+                    // 自愈认领也加锁，避免与 ensureReady 并发写状态
+                    mutex.withLock {
+                        if (loadedKey == null) {
+                            loadedKey = prompt
+                            promptDispatched = false
+                            Log.i(TAG, "调用方已取消，属主自行认领提示词（engine=$s）")
+                        }
+                    }
                 }
             }
         }
@@ -288,25 +306,46 @@ class SparkSession @Inject constructor(
      * 失败**不抛**（协程取消除外）——一律折进 [ReadyResult.Failed]，原因分
      * [ModelIssue.NoModelFile] / [ModelIssue.LoadFailed] / [ModelIssue.Interrupted] 三类，
      * 调用方自己决定降级还是把 [issueMessage] 摆到界面上。
+     *
+     * **锁的两段式**（并发口径，改这段前先读完）：
+     *  - [mutex] 只包「检查-赋值」这类微秒级段落，**绝不跨 267 秒的 JNI init**——
+     *    否则一次加载会把面板状态查询、设置页刷新全冻住；
+     *  - [initMutex] 把真正的 `llm.init/free` **串行化**：第二个调用方在这里排队，
+     *    排完先重查状态（前一个可能已完成），**不许 free 掉别人正在跑的 init、
+     *    也不许并发两次 init**——引擎状态机对 loadModel 的 `check(Initialized)`
+     *    在并发下会互踩，症状是「加载成功但其实无效」或原生层崩。
+     *  - 锁序恒为 initMutex → mutex，任何路径不得反向嵌套。
      */
     suspend fun ensureReady(): ReadyResult {
         val prompt = systemPrompt
-        if (loadedKey == prompt) return ReadyResult.Ready
-        return mutex.withLock {
-            if (loadedKey == prompt) return@withLock ReadyResult.Ready
 
-            // 上次只是调用方先超时、JNI 后台其实跑完了 → 直接接上
+        // 快速路径：已加载 / 上一轮 init 其实跑完了（调用方超时但引擎已 ModelReady）
+        mutex.withLock {
+            if (loadedKey == prompt) return ReadyResult.Ready
             if (inFlightPrompt == prompt &&
                 engine.state.value is com.arm.aichat.InferenceEngine.State.ModelReady
             ) {
                 loadedKey = prompt
-                return@withLock ReadyResult.Ready
+                return ReadyResult.Ready
             }
+        }
 
-            val file = findModel() ?: return@withLock ReadyResult.Failed(ModelIssue.NoModelFile)
-            try {
-                // 引擎是进程级单例，可能停在 Error/ModelReady 上；能复位就复位，
-                // 复位不了（比如 JNI 还在跑）就让它失败，下次靠上面那条接上。
+        val file = findModel() ?: return ReadyResult.Failed(ModelIssue.NoModelFile)
+
+        // 真正的 init 串行化。锁内只做微秒级状态准备，JNI 长调用在 initMutex 保护下
+        // 但仍不占 mutex —— 两个目标（不冻界面 × 不并发 init）同时满足。
+        initMutex.withLock {
+            // 排队期间前一个可能已经完成 → 重查一次，完成了就直接复用
+            mutex.withLock {
+                if (loadedKey == prompt) return ReadyResult.Ready
+                if (inFlightPrompt == prompt &&
+                    engine.state.value is com.arm.aichat.InferenceEngine.State.ModelReady
+                ) {
+                    loadedKey = prompt
+                    return ReadyResult.Ready
+                }
+            }
+            mutex.withLock {
                 if (engine.state.value !is com.arm.aichat.InferenceEngine.State.Initialized) {
                     runCatching { llm.free() }
                 }
@@ -314,15 +353,22 @@ class SparkSession @Inject constructor(
                 // 本轮从头来过：先撤销上一轮的「提示词挂上过」证据，
                 // 等真观察到 ProcessingSystemPrompt 再立起来（防止旧证据让监视器误认领）
                 promptDispatched = false
+            }
+
+            return try {
                 llm.init(file.absolutePath, prompt)
-                loadedKey = prompt
+                mutex.withLock {
+                    loadedKey = prompt
+                }
                 ReadyResult.Ready
             } catch (e: CancellationException) {
                 // 取消要照常抛出去，否则 withTimeoutOrNull 会以为这轮正常结束了
                 throw e
             } catch (e: Throwable) {
                 Log.w(TAG, "init 失败: ${e.message}", e)
-                loadedKey = null
+                mutex.withLock {
+                    loadedKey = null
+                }
                 ReadyResult.Failed(classifyInitFailure(e))
             }
         }
@@ -364,10 +410,28 @@ class SparkSession @Inject constructor(
         return llm.generate(userPrompt, maxTokens)
     }
 
+    /**
+     * 流式生成（**思考段与正文分通道**）。「思考过程」折叠区 + 正文气泡走这条。
+     *
+     * 与 [stream] 一样：未就绪抛 [IllegalStateException]，超时/取消由调用方包
+     * `withTimeoutOrNull { ... .collect { } }`，**不要在 Flow 内部再套超时**。
+     */
+    fun streamChunks(userPrompt: String, maxTokens: Int = DEFAULT_MAX_TOKENS): Flow<LlmChunk> {
+        check(loadedKey != null) { "模型未加载" }
+        return llm.generateChunks(userPrompt, maxTokens)
+    }
+
     fun unload() {
         runCatching { llm.free() }
+        // unload 是**非挂起**函数，不能在这里拿 suspend 锁（patch 原样会编译不过）。
+        // 三个状态写都落在 MutableStateFlow / @Volatile 字段上，单次写入本身是原子的；
+        // 失去的只是「和 ensureReady 的检查段排开」这一层保护，最坏窗口是
+        // 一个协程刚判完 loadedKey==prompt 就返回，随后 generate 因引擎已 free
+        // 抛 IllegalStateException —— 调用方本来就要接这个降级路径，不会崩、
+        // 也不会对外谎报「已加载」（loadedKey 这里已置 null，sessionState 立刻广播）。
         loadedKey = null
         inFlightPrompt = null
+        promptDispatched = false
     }
 
     private fun loadAccounts(kind: String): List<String> = runCatching {
@@ -425,6 +489,15 @@ class SparkSession @Inject constructor(
 
         /** 阿账对话模式的用户消息前缀。 */
         const val MODE_CHAT = "【对话】\n"
+
+        /**
+         * 问账判定模式的用户消息前缀。
+         *
+         * 与 [MODE_CHAT] 分开是因为**输出契约不同**：对话模式的查账信号是一个
+         * 字符串常量 `查账`（模型自己判断要不要查），而这里是「不管查不查，
+         * 先把意图和条件结构化出来」——问账页要拿它去跑本地 SQL。
+         */
+        const val MODE_QUERY = "【问账判定】\n"
     }
 }
 
@@ -437,7 +510,7 @@ class SparkSession @Inject constructor(
  */
 internal fun buildSystemPrompt(expense: List<String>, income: List<String>): String = buildString {
     append("你是「阿账」，一个运行在用户设备**本地**的记账管家，用简体中文，简短直接、不废话。\n")
-    append("你会收到两种输入，输出格式严格二选一，不要输出 JSON 之外的任何文字、解释或 markdown。\n\n")
+    append("你会收到三种输入，各自对应一种输出格式，不要输出 JSON 之外的任何文字、解释或 markdown。\n\n")
     append("A. 输入以【记账解析】开头：只输出 JSON **数组**，元素为\n")
     append("   {\"kind\":\"expense\"或\"income\",\"amount\":数字(元,最多两位小数),")
     append("\"category\":\"分类名\",\"note\":\"不超过10字的备注\",\"payee\":\"商户,没有就空串\",")
@@ -446,22 +519,83 @@ internal fun buildSystemPrompt(expense: List<String>, income: List<String>): Str
     append("   分类只能从这里选，不得自造：\n")
     append("     支出：").append(expense.joinToString("、")).append("\n")
     append("     收入：").append(income.joinToString("、")).append("\n")
-    append("   多笔合并拆成多个元素；中文数字转阿拉伯（五十块→50）；单位统一元。\n\n")
+    append("   多笔合并拆成多个元素；中文数字转阿拉伯（五十块→50）；单位统一元。\n")
+    append("   **amount 必须与用户原话里的数字完全一致**：原话是 20 就写 20，是 3.5 就写 3.5。\n")
+    append("   不许四舍五入、不许改成整数、不许自己补一个数——**记错金额比记不上更糟**。\n\n")
     append("B. 输入以【对话】开头：\n")
     append("   - 只输出 JSON，不要 JSON 之外的任何文字、解释或 markdown。\n")
     append("   - **判据（先看这条再选格式）**：句子里出现了**具体金额**和**买了什么**，")
     append("用户就是在报一笔账 → 输出 A 的 JSON 数组（上层会弹出记账卡片）；\n")
     append("     只是在问「花了多少」「哪类最多」这类要统计的 → 查账；除此之外才是说话。\n")
+    append("   - **报账的说法很多，下面这些全都输出数组，不是闲聊**：\n")
+    append("     商户+金额：「哈啰单车3.5元」「午餐20元」「打车28元」「星巴克咖啡32元」「便利店15.5」\n")
+    append("     动词+金额：「买咖啡用了18」「充话费100」「交房租3500」\n")
+    append("     **注意**：只要句子里有一个金额、又说了买了什么或在哪儿花的，就是报账。\n")
+    append("     不要因为句子短、没有「花」字、或看不懂那个商户名就转去闲聊回答（例如把")
+    append("「哈啰单车3.5元」答成「哈啰单车是共享单车功能」——那是错的分流）。\n")
     append("   - 三组例子，照着来（同样是这三类，别再自己发挥）：\n")
     append("     报账：「午饭花了 35」 → ")
     append("[{\"kind\":\"expense\",\"amount\":35,\"category\":\"餐饮\",\"note\":\"午饭\",\"payee\":\"\",\"confidence\":0.9}]\n")
     append("     查账：「这个月花了多少」「哪类最多」 → {\"reply\":\"查账\"}\n")
     append("     说话：「你好」「在吗」 → {\"reply\":\"你好，我是阿账，想记一笔就说一声。\"}\n")
+    append("   - 报账时 amount **必须与用户原话里的数字完全一致**，不许四舍五入、不许改数、")
+    append("不许自己补一个数（原话「午餐20元」就写 20，写 30 是严重错误）。\n")
     append("   - 否则输出 {\"reply\":\"你的回答\"}，60 字以内，**不编造具体金额、比例和统计数字**；\n")
     append("     用户在问「花了多少」「哪类最多」这类要查账的问题，reply 一律只写「查账」\n")
     append("     （上层会去查本地账本，不会让你算数）。\n")
     append("   - 输入是问候、闲聊、英文、或你看不懂的内容，**也必须**输出 {\"reply\":\"...\"}，\n")
     append("     用一句自然的中文回应（打个招呼，或请对方说清楚想记什么）。\n")
     append("   - **绝不输出**括号说明、道歉或占位文本（例如「（暂无具体对话内容）」「无法回答」）。\n")
-    append("     说不出口的话就写进 reply 里，不要写在 JSON 外面。\n")
+    append("     说不出口的话就写进 reply 里，不要写在 JSON 外面。\n\n")
+    append(QUERY_SECTION)
+    append("     支出：").append(expense.joinToString("、")).append("\n")
+    append("     收入：").append(income.joinToString("、")).append("\n")
+}
+
+/**
+ * 系统提示 C 段（问账判定）。
+ *
+ * 单独拎出来是为了能被单测逐条钉 —— 这一段就是「这句话算不算问账本」的判据本身。
+ *
+ * 两条刻意的口径：
+ *
+ * 1. **时间词只出符号名，不出日期**。「今天是几号」交给程序：模型算日期实测必错
+ *    （服务端同款 bug：「这个月」被算成上个月），而符号名→日期是一段纯算术，
+ *    本地做既准又能逐条单测。所以判据里明写「不要自己算日期」。
+ * 2. **没提时间就写 `all`，不是 `this_month`**。默认给「这个月」会把
+ *    「一共花了多少」静默答成本月，用户看到的数字少了一大截却没有任何提示 ——
+ *    与 `LocalQueryTranslator` 不猜日期是同一条口径。
+ */
+private val QUERY_SECTION: String = buildString {
+    append("C. 输入以【问账判定】开头：只判断这句话**是不是在问账本**，只输出**一个** JSON 对象。\n")
+    append("   - 是问账本（花了多少、哪类最多、去了几次、几笔、收支多少）→ 输出\n")
+    append("     {\"intent\":\"query\",\"range\":\"时间\",\"direction\":\"方向\",")
+    append("\"subject\":\"对象\",\"subject_kind\":\"种类\",\"group_by\":\"分组\"}\n")
+    append("   - 不是（闲聊、问候、要建议、报一笔账、问别的领域的事）→ 输出 {\"intent\":\"chat\"}\n")
+    append("   - **只输出这一个 JSON 对象**，不要解释、不要 markdown、不要多余字段。\n")
+    append("   - range 只能从下面**照抄**（左边是取值，右边是它的意思），")
+    append("**不要自己算日期**，今天是几号由程序处理：\n")
+    append("     today=今天 yesterday=昨天 day_before_yesterday=前天 this_week=本周 ")
+    append("last_week=上周 this_month=这个月 last_month=上个月 this_year=今年 last_year=去年\n")
+    append("     all=**没提时间**（「一共花了多少」就写 all，不要默认成这个月）\n")
+    append("   - direction 只能是 expense（花了/支出；**没提方向就写 expense**）")
+    append("| income（挣了/收入）| both（收支/结余/净额）\n")
+    append("   - subject_kind 只能是 category（分类词，从下面收支表里挑）| merchant（店名/对方名字）")
+    append("| none（没提）\n")
+    append("   - subject 是**要算的那样东西的名字**；没提就写空串 \"\"\n")
+    append("   - group_by 只能是 none | category（哪类最多）| merchant（哪家最多）| month（按月）\n")
+    append("   - 例子（照抄形状）：\n")
+    append("     「这个月花了多少」 → {\"intent\":\"query\",\"range\":\"this_month\",")
+    append("\"direction\":\"expense\",\"subject\":\"\",\"subject_kind\":\"none\",\"group_by\":\"none\"}\n")
+    append("     「哪类花得最多」 → {\"intent\":\"query\",\"range\":\"all\",\"direction\":\"expense\",")
+    append("\"subject\":\"\",\"subject_kind\":\"none\",\"group_by\":\"category\"}\n")
+    append("     「星巴克去了几次」 → {\"intent\":\"query\",\"range\":\"all\",\"direction\":\"expense\",")
+    append("\"subject\":\"星巴克\",\"subject_kind\":\"merchant\",\"group_by\":\"none\"}\n")
+    append("     「这个月餐饮花了多少」 → {\"intent\":\"query\",\"range\":\"this_month\",")
+    append("\"direction\":\"expense\",\"subject\":\"餐饮\",\"subject_kind\":\"category\",\"group_by\":\"none\"}\n")
+    append("     「去年一共挣了多少」 → {\"intent\":\"query\",\"range\":\"last_year\",")
+    append("\"direction\":\"income\",\"subject\":\"\",\"subject_kind\":\"none\",\"group_by\":\"none\"}\n")
+    append("     「给我省钱建议」 → {\"intent\":\"chat\"}\n")
+    append("     「今天天气怎么样」 → {\"intent\":\"chat\"}（**只有时间词不算问账**）\n")
+    append("   - 分类词表（认成 category 时 subject 必须原样取自这里）：\n")
 }

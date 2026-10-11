@@ -48,13 +48,14 @@ data class LedgerUiState(
 class LedgerViewModel @Inject constructor(
     private val repository: LedgerRepository,
     private val budgetStore: MonthlyBudgetStore,
-    clock: Clock,
+    private val clock: Clock,
 ) : ViewModel() {
 
-    private val today = clock.today()
-    private val monthStart = today.withDayOfMonth(1)
-    private val monthEnd = today.with(TemporalAdjusters.lastDayOfMonth())
-    private val monthLabel = "${today.year} 年 ${today.monthValue} 月"
+    /** 用 getter 替代 val，确保跨天时能拿到最新日期（用户可能从昨晚用到凌晨）。 */
+    private val today: java.time.LocalDate get() = clock.today()
+    private val monthStart get() = today.withDayOfMonth(1)
+    private val monthEnd get() = today.with(TemporalAdjusters.lastDayOfMonth())
+    private val monthLabel get() = "${today.year} 年 ${today.monthValue} 月"
 
     private val _hideAmounts = MutableStateFlow(false)
     val hideAmounts: StateFlow<Boolean> = _hideAmounts.asStateFlow()

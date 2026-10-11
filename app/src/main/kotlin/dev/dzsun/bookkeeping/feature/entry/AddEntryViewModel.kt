@@ -23,6 +23,10 @@ import dev.dzsun.bookkeeping.core.network.ReceiptFields
 import dev.dzsun.bookkeeping.core.network.TaskFeedback
 import dev.dzsun.bookkeeping.core.network.UserFacingErrors
 import dev.dzsun.bookkeeping.core.platform.Clock
+import dev.dzsun.bookkeeping.llm.SourceTag
+import dev.dzsun.bookkeeping.llm.SparkSession
+import com.arm.aichat.InferenceEngine
+import android.os.SystemClock
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -114,6 +118,21 @@ data class AddEntryUiState(
     // —— AI 模式 ——
     val rawText: String = "",
     val isParsing: Boolean = false,
+
+    /**
+     * 本轮解析的起点（`SystemClock.elapsedRealtime()`），等待态显示「已用时」用它。
+     * null = 没在解析，界面不显示秒数（不编一个 0 秒出来）。
+     */
+    val parseStartedAtMs: Long? = null,
+
+    /**
+     * 这轮等待是否已落到**本机模型**上。主路径是调度层（DISPATCH），失败回落
+     * 本地解析后为 true —— 此时阶段跟引擎真实状态走，不能继续显示「AI 服务识别中」。
+     */
+    val parseViaModel: Boolean = false,
+
+    /** 本地解析的来源；`RULES` = 模型没顶上、规则兜底，结果区要标出来。 */
+    val parseSource: SourceTag? = null,
     val isListening: Boolean = false,
     val cards: List<DraftCard> = emptyList(),
     val parseError: String? = null,
@@ -173,12 +192,19 @@ data class AddEntryUiState(
 class AddEntryViewModel @Inject constructor(
     private val repository: LedgerRepository,
     private val clock: Clock,
-    private val parser: AiParser,
+    private val parser: SparkAiParser,
     private val clarificationPort: ClarificationPort,
     private val captureClient: CaptureClient,
     private val autoConfirmSettings: AutoConfirmSettings,
     private val autoEntryUndo: AutoEntryUndo,
+    private val session: SparkSession,
 ) : ViewModel() {
+
+    /**
+     * 引擎真实状态 —— 等待可视化只认它推导阶段（`phaseOf`），
+     * 记一笔页不自己猜「现在到哪一步了」。
+     */
+    val engineState: StateFlow<InferenceEngine.State> get() = session.state
 
     private val _state = MutableStateFlow(AddEntryUiState(dateEpochDay = clock.today().toEpochDay()))
     val state: StateFlow<AddEntryUiState> = _state.asStateFlow()
@@ -231,7 +257,17 @@ class AddEntryViewModel @Inject constructor(
      * HEIF 得先在调用方转成 JPEG。
      */
     fun onPhotoCaptured(bytes: ByteArray, mime: String) {
-        _state.update { it.copy(isParsing = true, parseError = null, allSaved = false, aiSource = JournalSource.RECEIPT) }
+        _state.update {
+            it.copy(
+                isParsing = true,
+                parseError = null,
+                allSaved = false,
+                aiSource = JournalSource.RECEIPT,
+                parseStartedAtMs = SystemClock.elapsedRealtime(),
+                parseViaModel = false,
+                parseSource = null,
+            )
+        }
         viewModelScope.launch {
             runCapture(
                 request = CaptureRequest(intent = INTENT_RECEIPT, text = null, media = MediaPayload(bytes, mime)),
@@ -251,7 +287,17 @@ class AddEntryViewModel @Inject constructor(
             _state.update { it.copy(parseError = "先说说这笔账，比如「今天打车花了 30」") }
             return
         }
-        _state.update { it.copy(isParsing = true, parseError = null, allSaved = false, aiSource = JournalSource.VOICE) }
+        _state.update {
+            it.copy(
+                isParsing = true,
+                parseError = null,
+                allSaved = false,
+                aiSource = JournalSource.VOICE,
+                parseStartedAtMs = SystemClock.elapsedRealtime(),
+                parseViaModel = false,
+                parseSource = null,
+            )
+        }
         viewModelScope.launch {
             runCapture(
                 request = CaptureRequest(intent = INTENT_RECEIPT, text = raw),
@@ -335,17 +381,22 @@ class AddEntryViewModel @Inject constructor(
     }
 
     private suspend fun parseOffline(raw: String, today: Long, current: AddEntryUiState) {
-        val parsed = runCatching { parser.parse(raw) }
+        // 调度层没顶上，这一段等待是本机模型/规则在干活——阶段跟引擎真实状态走。
+        _state.update { it.copy(parseViaModel = true) }
+        val outcome = runCatching { parser.parseWithSource(raw) }
             .getOrElse {
                 _state.update { it.copy(isParsing = false, parseError = "解析失败，换种说法试试") }
                 return
             }
+        val parsed = outcome.entries
         if (parsed.isEmpty()) {
             _state.update {
                 it.copy(isParsing = false, parseError = "没听懂金额，试试「午饭 18 元」这样的说法")
             }
             return
         }
+        // 来源要让用户看得见，三处同一套口径（SourceTag）——含「模型没接上」的具体原因
+        _state.update { it.copy(parseSource = outcome.source) }
         val cards = parsed.map { p ->
             DraftCard(
                 id = p.id,
