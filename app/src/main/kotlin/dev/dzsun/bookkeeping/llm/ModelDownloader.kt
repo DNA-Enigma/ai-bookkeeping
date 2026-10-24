@@ -2,7 +2,6 @@ package dev.dzsun.bookkeeping.llm
 
 import java.io.File
 import java.io.IOException
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -10,24 +9,71 @@ import java.security.MessageDigest
 /**
  * 下载任务的**描述与期望值**——UI/管理器都只认它，不认具体 URL 字符串。
  *
- * [expectedSha256] 为空时跳过校验并**明示**（占位期的诚实策略：没给真值就说没验，
- * 不假装验过）。真实模型文件的 sha256 到位后连着 [url] 一起换。
+ * [expectedSha256] **没有默认值**：没有期望哈希就只能「不校验」，而「不校验」与
+ * 「校验通过」在界面上长得一模一样，用户无从分辨。所以让「没给哈希」在类型层面
+ * 就写不出来——要么给真值，要么别走这个下载器。
+ *
+ * [expectedBytes] 是**便宜的前置判据**：大小对不上直接判不符，不必为了算哈希
+ * 把 1 GB 读一遍。`-1` 表示未知（只有测试或老调用点会这样传）。
  */
 data class ModelDownloadSpec(
     val url: String,
     val fileName: String,
-    val expectedSha256: String = "",
-)
+    val expectedSha256: String,
+    val expectedBytes: Long = -1L,
+) {
+    init {
+        require(expectedSha256.length == SHA256_HEX_LENGTH && expectedSha256.all { it.isSha256HexDigit() }) {
+            "expectedSha256 必须是 $SHA256_HEX_LENGTH 位十六进制；空串或不完整的摘要无法校验，还会被误当成已校验"
+        }
+        require(expectedBytes >= -1L) { "expectedBytes 只能是 -1（未知）或真实字节数，收到 $expectedBytes" }
+    }
 
-/** 下载结果。**半截文件绝不叫正式名**——成功路径之外 `.part` 一律不留。 */
+    private companion object {
+        const val SHA256_HEX_LENGTH = 64
+
+        fun Char.isSha256HexDigit(): Boolean =
+            this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+    }
+}
+
+/** 下载结果。**半截文件绝不叫正式名**——成功路径之外不把 `.part` 当成品。 */
 sealed interface ModelDownloadResult {
-    /** 下载完成且（若给了期望值）SHA256 校验通过。 */
+    /** 下载完成且 SHA256 校验通过（[ModelDownloadSpec.expectedSha256] 是必填的，不存在「没验也算成功」）。 */
     data class Success(val file: File, val bytes: Long, val sha256: String) : ModelDownloadResult
 
-    /** 校验不匹配：已把 .part 删掉，由调用方决定是否重下。 */
+    /**
+     * 校验不匹配。`.part` **保留**，删不删由调用方决定（管理器的策略是删掉重下一次）。
+     */
     data class ChecksumMismatch(val expected: String, val actual: String, val bytes: Long) : ModelDownloadResult
 
     data class Failed(val message: String) : ModelDownloadResult
+}
+
+/**
+ * 「目标位置已有的那个文件」的判定结论。
+ *
+ * 存在的理由：**「文件在盘上」不等于「模型可用」**。曾经这里只看
+ * `isFile && length() > 0`，于是任何同名的非空文件都能冒充「已就绪」，
+ * 卡片上还写着「校验通过」。现在三个分支各自带证据，调用方必须显式处理 [Mismatch]。
+ */
+sealed interface ExistingModelFile {
+    /** 没有文件，或长度为 0（0 字节不构成任何证据，与不存在同义）。 */
+    data object Absent : ExistingModelFile
+
+    /** 在盘上，且大小（若给了期望值）与 SHA256 都与 spec 一致。 */
+    data class Verified(val file: File, val bytes: Long, val sha256: String) : ExistingModelFile
+
+    /**
+     * 在盘上但对不上。[actualSha256] 为 null 表示**没算**——大小先对不上，
+     * 省掉了读 1 GB 的功夫。[reason] 是给人看的那句话。
+     */
+    data class Mismatch(
+        val file: File,
+        val bytes: Long,
+        val actualSha256: String?,
+        val reason: String,
+    ) : ExistingModelFile
 }
 
 /**
@@ -35,22 +81,26 @@ sealed interface ModelDownloadResult {
  *
  * ## 续传协议
  *
- *  - 目标处已有完整文件（大小 == 总长，总长未知时看不了）→ 不下载直接成功；
+ *  - 目标处已有文件 → 先过 [inspectExisting]：大小（若给了期望值）与 SHA256 都对
+ *    才算成功且不发一个请求；对不上就删掉它，按全新下载处理；
  *  - 有 `.part` → 带 `Range: bytes=<已下>-` 重开：**206** = 接着写；
  *    **200** = 服务器不支持 Range，弃 `.part` 重头；
  *  - 没有 `.part` → 全新 GET。
  *
- * ## 纪律（与 [ModelInstaller] 同一套，理由不重复展开）
+ * ## 磁盘纪律
  *
  *  1. 先写 `.part`，SHA256 通过后才改名——残缺模型不许占用正式文件名；
  *  2. SHA256 **边下边算**（流式），不为校验再读一遍 1 GB；
- *  3. 任何失败清掉 `.part`（校验不匹配除外——它由调用方决定重试策略，
- *     但 [ModelDownloader] 自己不删，因为调用方可能想先看看实际哈希）。
+ *  3. `.part` 什么时候清、什么时候留，**按失败的性质分**：
+ *     - 网络/IO 中断、取消 → **保留**：那就是续传的全部本钱，清了等于白下；
+ *     - 服务器 200 全量重发 → **清掉**：旧 `.part` 对新请求的前缀无意义；
+ *     - SHA256 不匹配 → **保留**，由调用方决定（可能要先看看实际哈希再重下）。
  *
- * ⚠️ 但「断点续传」与「失败清 .part」对**网络中断**是矛盾的：下到一半断网，
- * `.part` 就是续传的全部本钱，清了等于白下。所以网络类失败**保留 `.part`**，
- * 只清「确定写坏了」的场景（本地 IO 异常除外——同上保留）。
- * 真正要清的只有一种情况：服务器 200 全量重发（旧 .part 内容对新请求无意义）。
+ * ## 关于「校验」
+ *
+ * [ModelDownloadSpec.expectedSha256] 是必填的，[download] 的每条成功路径都会
+ * 真的比对过它。**不存在「没给哈希就跳过校验」这种模式**——跳过校验的结果和
+ * 校验通过的结果在界面上长得一样，那是骗人的。
  */
 class ModelDownloader(
     private val targetDir: File,
@@ -82,6 +132,47 @@ class ModelDownloader(
     fun targetFile(spec: ModelDownloadSpec): File = File(targetDir, spec.fileName)
 
     /**
+     * 检查目标位置已有的文件，**不下载**。
+     *
+     * 管理器在启动前用它决定卡片该显示「已就绪」还是「可以下载」——那个判断必须
+     * 与 [download] 用同一套判据，否则会出现「卡片说能用、下载器说不对」的分裂。
+     *
+     * 判据（按代价从低到高，任一不过就返回 [ExistingModelFile.Mismatch]）：
+     *  1. 是普通文件且长度 > 0；
+     *  2. 大小 == [ModelDownloadSpec.expectedBytes]（给了期望值时）；
+     *  3. SHA256 == [ModelDownloadSpec.expectedSha256]（这条一定要真算，不省）。
+     */
+    fun inspectExisting(spec: ModelDownloadSpec): ExistingModelFile {
+        val target = targetFile(spec)
+        if (!target.isFile) return ExistingModelFile.Absent
+        val bytes = target.length()
+        // 0 字节不构成任何证据：可能是建了文件就断电，和「不存在」处理成一样
+        if (bytes <= 0L) return ExistingModelFile.Absent
+
+        if (spec.expectedBytes > 0 && bytes != spec.expectedBytes) {
+            // 大小先对不上就别读 1 GB 算哈希了
+            return ExistingModelFile.Mismatch(
+                file = target,
+                bytes = bytes,
+                actualSha256 = null,
+                reason = "文件大小 $bytes 字节，期望 ${spec.expectedBytes} 字节",
+            )
+        }
+
+        val actual = sha256OfFile(target)
+        val expected = spec.expectedSha256.trim().lowercase()
+        if (actual != expected) {
+            return ExistingModelFile.Mismatch(
+                file = target,
+                bytes = bytes,
+                actualSha256 = actual,
+                reason = "SHA256 不匹配（实际 ${actual.take(16)}…）",
+            )
+        }
+        return ExistingModelFile.Verified(target, bytes, actual)
+    }
+
+    /**
      * 执行下载。[onProgress] 收**绝对字节数**（不是 0..1——续传起点非 0，
      * 百分比交给 UI 层按总长算）与总长（未知 -1）。
      *
@@ -96,21 +187,18 @@ class ModelDownloader(
         val target = targetFile(spec)
         val part = partFile(spec)
 
-        // 已有完整文件：不碰网络（管理器在 start 前也会查，这里是防御——
-        // 两次调用之间文件可能被别处放好）。哈希照实算——这个 Result 的
-        // sha256 字段不许拿空串冒充「校验过了」。
-        if (target.isFile && target.length() > 0) {
-            val sha = target.inputStream().use { stream ->
-                val d = MessageDigest.getInstance("SHA-256")
-                val buf = ByteArray(BUFFER_BYTES)
-                while (true) {
-                    val n = stream.read(buf)
-                    if (n < 0) break
-                    d.update(buf, 0, n)
-                }
-                d.digest().joinToString("") { "%02x".format(it) }
+        // 已有文件：先用与管理器同一套判据验一遍，验过才不发请求。
+        // 对不上就删掉——继续保留只会让每次启动都白算一遍 1 GB 的哈希。
+        when (val existing = inspectExisting(spec)) {
+            is ExistingModelFile.Verified ->
+                return ModelDownloadResult.Success(existing.file, existing.bytes, existing.sha256)
+
+            is ExistingModelFile.Mismatch -> {
+                // 删不掉不算致命：后面写 .part 再 rename 时还会再撞一次，那里有明确报错
+                existing.file.delete()
             }
-            return ModelDownloadResult.Success(target, target.length(), sha)
+
+            ExistingModelFile.Absent -> Unit
         }
 
         if (!targetDir.isDirectory && !targetDir.mkdirs()) {
@@ -210,10 +298,19 @@ class ModelDownloader(
                 // .part 保留：可能只是连接断了没读到 EOF，下次续传
                 return ModelDownloadResult.Failed("下载不完整：$written / $total 字节（部分已保留，重试会接着下）")
             }
+            // 再核一遍「期望字节数」：有些服务器不给 Content-Length（total 为 -1），
+            // 上面那条就失效了，而 spec 里若有真值则仍是廉价判据。
+            if (spec.expectedBytes > 0 && written != spec.expectedBytes) {
+                return ModelDownloadResult.Failed(
+                    "下载大小不符：$written 字节，期望 ${spec.expectedBytes} 字节（部分已保留，重试会接着下）",
+                )
+            }
 
             val actualSha = digest.digest().joinToString("") { "%02x".format(it) }
             val expected = spec.expectedSha256.trim().lowercase()
-            if (expected.isNotEmpty() && actualSha != expected) {
+            // 无条件比对：expectedSha256 在类型上就保证是 64 位十六进制，
+            // 「没给哈希」这个状态写不出来，所以这里没有「跳过校验」的分支。
+            if (actualSha != expected) {
                 // 校验不匹配：.part 交调用方处置（管理器的策略是删掉重下）
                 return ModelDownloadResult.ChecksumMismatch(expected, actualSha, written)
             }
@@ -249,12 +346,20 @@ class ModelDownloader(
         return if (len >= 0) len + resumeFrom else -1L
     }
 
+    /** 流式算整个文件的 SHA256——1 GB 也不进内存。 */
+    private fun sha256OfFile(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { stream ->
+            val buf = ByteArray(BUFFER_BYTES)
+            while (true) {
+                val n = stream.read(buf)
+                if (n < 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
     private fun mb(bytes: Long) = bytes / 1024 / 1024
 
 }
-
-/**
- * 供 JVM 单测用的打开器工厂：把 URL 映射到预置的假连接。
- * Android 侧不需要它——默认参数就是真 `URL.openConnection`。
- */
-internal typealias ConnectionOpener = (String) -> HttpURLConnection

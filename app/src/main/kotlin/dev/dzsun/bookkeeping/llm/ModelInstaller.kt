@@ -45,17 +45,34 @@ class ModelInstaller(
         data class Failed(val message: String) : Result
     }
 
+    /**
+     * 这个安装包里到底有没有内置模型。
+     *
+     * 界面拿它决定「首装该怎么拿到模型」：有内置资产 → 点一下释放（full 版）；
+     * 没有 → 必须联网下载（lite 版）。判错的代价是给 lite 用户显示一个点不动的
+     * 释放入口，或者给 full 用户显示一句「下载约 1 GB」——后者等于让用户白花一个 G 的流量。
+     */
+    fun hasBundledModel(): Boolean = bundledAssetName() != null
+
     /** 内置模型的字节数；没有内置模型时返回 -1（UI 用它显示总进度） */
     fun expectedBytes(): Long {
-        val name = assets.names().firstOrNull { it.endsWith(".gguf", ignoreCase = true) } ?: return -1L
+        val name = bundledAssetName() ?: return -1L
         return assets.sizeOf(name)
     }
+
+    /**
+     * 安装包里那个 GGUF 的资产路径。判定口径只有这一处：
+     * [hasBundledModel]、[expectedBytes]、[ensure] 全走它，避免三处各写一遍
+     * 后缀判断、将来改一处漏两处。
+     */
+    private fun bundledAssetName(): String? =
+        assets.names().firstOrNull { it.endsWith(".gguf", ignoreCase = true) }
 
     /**
      * @param onProgress 0.0..1.0，节流到约每 1% 或每 8 MB 上报一次
      */
     fun ensure(onProgress: (Float) -> Unit = {}): Result {
-        val assetName = assets.names().firstOrNull { it.endsWith(".gguf", ignoreCase = true) }
+        val assetName = bundledAssetName()
             ?: return Result.Failed("安装包里没有内置模型资产")
 
         val fileName = assetName.substringAfterLast('/')

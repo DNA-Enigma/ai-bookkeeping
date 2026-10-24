@@ -18,8 +18,8 @@ android {
         applicationId = "dev.dzsun.bookkeeping"
         minSdk = 26
         targetSdk = 36
-        versionCode = 22
-        versionName = "0.22.0"
+        versionCode = 23
+        versionName = "0.23.0"
 
         ndk {
             // 真机只发 arm64（包体小、也是目标机型的架构）。

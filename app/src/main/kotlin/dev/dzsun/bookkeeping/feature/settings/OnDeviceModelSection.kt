@@ -162,8 +162,24 @@ class OnDeviceModelViewModel @Inject constructor(
     private val _modelFile = MutableStateFlow(findModel())
     val modelFile: StateFlow<File?> = _modelFile.asStateFlow()
 
-    /** 下载状态（Idle/Running/Ready/Failed）——下载卡片的唯一数据源。 */
+    /** 下载状态（Verifying/Idle/Running/Ready/Failed）——下载卡片的唯一数据源。 */
     val downloadState: StateFlow<DownloadUiState> = downloadManager.uiState
+
+    /**
+     * 已下但未校验的部分文件大小；0 = 没有可续传的进度。
+     * 界面拿它把「点此开始」换成「继续下载（已下 X MB）」——**有进度就得说，
+     * 否则用户会以为上次白下了**。
+     */
+    val resumable: StateFlow<Long> = downloadManager.resumableBytes
+
+    /**
+     * 这个包装的是不是自带模型的版本（full 内置 GGUF，lite 没有）。
+     *
+     * 界面拿它决定该不该出现「下载模型」卡片：full 首装根本没有下载这回事，
+     * 显示一张 1 GB 的下载卡等于让用户白花流量；而 lite 没有内置资产时
+     * 必须给下载入口，否则用户没有别的路拿到模型。
+     */
+    val hasBundledModel: Boolean = installer.hasBundledModel()
 
     /** 点「下载模型」：发起/续传下载。进度与收场由管理器推 [downloadState]。 */
     fun startDownload() = downloadManager.start()
@@ -398,19 +414,27 @@ fun OnDeviceModelSection(state: OnDeviceUiState, viewModel: OnDeviceModelViewMod
 
     val model by viewModel.modelFile.collectAsStateWithLifecycle()
     val download by viewModel.downloadState.collectAsStateWithLifecycle()
+    val resumable by viewModel.resumable.collectAsStateWithLifecycle()
 
-    // lite 版主路径：设备上没有模型 → 先显示下载卡片；下载完自动变「可以用了」
-    DownloadCard(
-        download = download,
-        hasModelFile = model != null,
-        onStart = viewModel::startDownload,
-        onCancel = viewModel::cancelDownload,
-        onDismiss = viewModel::dismissDownloadFailure,
-    )
+    // lite 版主路径：设备上没有模型 → 先显示下载卡片；下载完自动变「可以用了」。
+    // full 版自带模型时不显示下载入口——它没有下载这回事。
+    if (!viewModel.hasBundledModel) {
+        DownloadCard(
+            download = download,
+            hasModelFile = model != null,
+            resumableBytes = resumable,
+            onStart = viewModel::startDownload,
+            onCancel = viewModel::cancelDownload,
+            onDismiss = viewModel::dismissDownloadFailure,
+        )
+    }
 
     val modelLine = when {
         model != null -> "模型：${model!!.name}（${model!!.length() / 1024 / 1024} MB）"
-        else -> "模型：未就绪 · 下载或点「加载模型」释放内置资产"
+        // 两种包装拿模型的路径不同，文案不能通用：full 一句话就能释放出来，
+        // lite 得先联网下 1 GB。说反了用户会在界面上找一个不存在的按钮。
+        viewModel.hasBundledModel -> "模型：未就绪 · 点「加载模型」释放内置资产"
+        else -> "模型：未就绪 · 先下载模型"
     }
     Text(modelLine, style = TextStyle(fontSize = 12.sp, fontFamily = FontFamily.Monospace), color = p.ink3)
     Spacer(Modifier.height(10.dp))
@@ -537,23 +561,41 @@ private fun StatusText(text: String, color: androidx.compose.ui.graphics.Color) 
  * 下载卡片：lite 版首次用模型的入口。
  *
  * 状态机（[DownloadUiState]）→ 界面：
+ *  - Verifying：启动时在核对盘上已有的文件（算 SHA256），不说「可以用了」也
+ *    不说「没有」——只如实说在查。几百毫秒到几秒，但期间给个「没有」是错的；
  *  - Idle：一张「下载模型（约 1 GB）」的卡片，点它开始；设备上已有 .part 时
- *    标明「继续下载」——那是上次断点，不是从头来；
+ *    写成「继续下载（已下 X MB）」——那是上次断点，不是从头来；
  *  - Running：真进度条（有分母）+ 已下载/总量/速度/剩余（与通知栏同源）；
  *  - Ready：绿字「可以用了」，用户接着点「加载模型」；
  *  - Failed：原因 + 重试入口（半截 .part 保留着，重试是续传不是重头）。
+ *
+ * 只在**没有内置模型**的包（lite）上渲染；full 版自带 GGUF，由调用方拦住。
  */
 @Composable
 private fun DownloadCard(
     download: DownloadUiState,
     hasModelFile: Boolean,
+    resumableBytes: Long,
     onStart: () -> Unit,
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val p = Art.colors
     when (download) {
+        is DownloadUiState.Verifying -> {
+            Text(
+                if (resumableBytes > 0) "正在核对模型文件…（上次下到 ${mbText(resumableBytes)}）"
+                else "正在核对模型文件…",
+                style = TextStyle(fontSize = 12.5.sp),
+                color = p.ink3,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+
         is DownloadUiState.Idle -> if (!hasModelFile) {
+            // 有 .part 就是「上次没下完」：标题和右侧动作都得跟着变，
+            // 否则用户看到「点此开始」会以为进度丢了、白下了一遍。
+            val resume = resumableBytes > 0
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -565,12 +607,12 @@ private fun DownloadCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "下载模型（约 1 GB）",
+                    if (resume) "继续下载（已下 ${mbText(resumableBytes)}）" else "下载模型（约 1 GB）",
                     style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium),
                     color = p.accent,
                     modifier = Modifier.weight(1f),
                 )
-                Text("点此开始", style = TextStyle(fontSize = 12.sp), color = p.ink3)
+                Text(if (resume) "接着下" else "点此开始", style = TextStyle(fontSize = 12.sp), color = p.ink3)
             }
             Spacer(Modifier.height(10.dp))
         }
@@ -620,6 +662,16 @@ private fun DownloadCard(
             Spacer(Modifier.height(10.dp))
         }
     }
+}
+
+/**
+ * 字节数 → 人看的大小。**只有一处口径**，免得卡片里、通知栏里、日志里各除各的。
+ *
+ * 不足 1 MB 时给 KB 而不是「0 MB」：刚下几秒就断的用户看到「已下 0 MB」会以为没开始。
+ */
+private fun mbText(bytes: Long): String {
+    val mb = bytes / 1024 / 1024
+    return if (mb > 0) "$mb MB" else "${bytes / 1024} KB"
 }
 
 @Composable

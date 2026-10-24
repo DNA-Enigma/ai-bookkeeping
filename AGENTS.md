@@ -1436,3 +1436,26 @@ prompt 只说「'这个月'换算成具体日期」，却没告诉模型今天�
    「正在加载模型」。日志与字节数是硬证据，进度 UI 只在空间不足那张截图里间接可见。
 3. **真机 arm64 没验过**，本次全部证据来自 x86_64 模拟器。
 4. 升版本号只改了 gradle，**0.18.0 的包还没装回模拟器**（装的是 0.17.0 + 本次代码）。
+
+### 2026-10-24 · 界面/交付这边（0.23.0：lite/full 模型获取路径分流）
+
+用户报的问题：lite 版装上后设置页给的是「下载」还是「释放内置模型」，两条路没分开；
+而 full 版用户可能被引导去下 1 GB 流量。
+
+#### 改了什么
+
+| 文件 | 改了什么 |
+|---|---|
+| `llm/ModelInstaller.kt` | 新增 `hasBundledModel()` / `expectedBytes()`，与 `ensure()` 共用**同一个** `bundledAssetName()` 判定 |
+| `llm/ModelDownloadManager.kt` | 新增 `DownloadUiState.Verifying` 初态 + `resumableBytes` StateFlow |
+| `llm/ModelDownloader.kt` | 纯 JVM 下载器（206 续写 / 200 弃 part / 续传前喂 digest / 真 SHA256 校验） |
+| `feature/settings/OnDeviceModelSection.kt` | 按 `hasBundledModel` 二选一渲染；五分支状态卡；`mbText` 统一口径 |
+| `README.md` | 「两个版本怎么选」与下载能力描述对齐代码事实 |
+| `app/build.gradle.kts` | 共用文件：版本 `0.22.0` → **`0.23.0`**（versionCode 23） |
+
+#### 验证
+
+`tools/build.sh :app:testFullDebugUnitTest :app:testLiteDebugUnitTest` → **BUILD SUCCESSFUL in 36s**。
+两个口味各 **672 用例、0 失败、0 错误、6 跳过**（56 个测试类）。
+
+**未做**：模拟器/真机均未运行。D1/D2/D3 仍全部待用户执行，本轮的绿只是 JVM 单测与编译。
