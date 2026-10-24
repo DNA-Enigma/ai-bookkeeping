@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -70,6 +71,7 @@ import dev.dzsun.bookkeeping.core.designsystem.IncomeGreen
 import dev.dzsun.bookkeeping.core.money.Money
 import dev.dzsun.bookkeeping.core.statement.ImportOutcome
 import dev.dzsun.bookkeeping.core.statement.ImportPlan
+import dev.dzsun.bookkeeping.core.statement.PlannedReversal
 import dev.dzsun.bookkeeping.core.statement.StatementDirection
 import dev.dzsun.bookkeeping.core.statement.StatementLimits
 import kotlinx.coroutines.Dispatchers
@@ -130,6 +132,7 @@ fun ImportScreen(
                     state = state,
                     onConfirm = viewModel::confirmImport,
                     onBackToFile = viewModel::restart,
+                    onReversalToggled = viewModel::onReversalToggled,
                 )
 
                 is ImportStage.Committed -> CommittedPane(
@@ -400,10 +403,18 @@ private fun PreviewPane(
     state: ImportUiState,
     onConfirm: () -> Unit,
     onBackToFile: () -> Unit,
+    onReversalToggled: (Int, Boolean) -> Unit,
 ) {
     val currency = state.currency
     val summary = remember(plan, currency) { plan.toSummary(currency) }
     val rows = remember(plan) { plan.toPreviewRows() }
+    // 预览与落库共用这一份「行号 → 冲减」索引，避免用户勾的和实际冲的错位
+    val reversalsByRow = remember(plan) { plan.reversalsByRow() }
+    val selectedReversalCount = state.selectedReversalRows.count { it in reversalsByRow }
+    // 状态变化里有几笔是能勾选冲减的：结果页那句提示据此换说法
+    val reversibleStatusChangedCount = remember(plan) {
+        plan.statusChanged.count { it.rowNumber in reversalsByRow }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -411,7 +422,7 @@ private fun PreviewPane(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item { SummaryCard(summary, plan.formatName) }
+            item { SummaryCard(summary, plan.formatName, reversibleStatusChangedCount) }
             if (state.warnings.isNotEmpty()) {
                 item {
                     Column {
@@ -434,7 +445,14 @@ private fun PreviewPane(
                 )
             }
             items(rows, key = { "${it.kind}-${it.rowNumber}" }) { row ->
-                PreviewRowCard(row, currency)
+                val reversal = reversalsByRow[row.rowNumber]
+                PreviewRowCard(
+                    row = row,
+                    currency = currency,
+                    reversal = reversal,
+                    reversalChecked = reversal != null && row.rowNumber in state.selectedReversalRows,
+                    onReversalCheckedChange = { onReversalToggled(row.rowNumber, it) },
+                )
             }
             item { Spacer(Modifier.height(72.dp)) }
         }
@@ -456,7 +474,9 @@ private fun PreviewPane(
             }
             Button(
                 onClick = onConfirm,
-                enabled = summary.importable && !state.isBusy,
+                // 只有冲减没有待导入时也要能点：一份账单可能整份都是退款，
+                // 那时 importCount 为 0，但用户确实有事要办
+                enabled = (summary.importable || selectedReversalCount > 0) && !state.isBusy,
                 modifier = Modifier
                     .weight(1f)
                     .height(48.dp),
@@ -468,7 +488,13 @@ private fun PreviewPane(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 } else {
-                    Text("确认导入 ${summary.importCount} 笔")
+                    Text(
+                        if (selectedReversalCount > 0) {
+                            "确认导入 ${summary.importCount} 笔 · 冲减 $selectedReversalCount 笔"
+                        } else {
+                            "确认导入 ${summary.importCount} 笔"
+                        },
+                    )
                 }
             }
         }
@@ -476,7 +502,11 @@ private fun PreviewPane(
 }
 
 @Composable
-private fun SummaryCard(summary: ImportSummary, formatName: String?) {
+private fun SummaryCard(
+    summary: ImportSummary,
+    formatName: String?,
+    reversibleStatusChangedCount: Int = 0,
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             if (formatName != null) {
@@ -526,7 +556,11 @@ private fun SummaryCard(summary: ImportSummary, formatName: String?) {
                 SummaryLine(
                     label = "状态变化",
                     value = "${summary.statusChangedCount} 笔",
-                    detail = "多半是退款，需单独处理，本次不导入",
+                    detail = if (reversibleStatusChangedCount > 0) {
+                        "$reversibleStatusChangedCount 笔是退款，可勾选冲减（默认不冲）"
+                    } else {
+                        "多半是退款，需单独处理，本次不导入"
+                    },
                 )
             }
             if (summary.excludedCount > 0) {
@@ -587,7 +621,13 @@ private fun SummaryLine(
 }
 
 @Composable
-private fun PreviewRowCard(row: PreviewRow, currency: String) {
+private fun PreviewRowCard(
+    row: PreviewRow,
+    currency: String,
+    reversal: PlannedReversal? = null,
+    reversalChecked: Boolean = false,
+    onReversalCheckedChange: (Boolean) -> Unit = {},
+) {
     val skipped = row.kind != PreviewRow.Kind.IMPORT
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -603,6 +643,14 @@ private fun PreviewRowCard(row: PreviewRow, currency: String) {
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 只有能真正落库的冲减才给勾选框；认不出金额的行连入口都没有
+            if (reversal != null) {
+                Checkbox(
+                    checked = reversalChecked,
+                    onCheckedChange = onReversalCheckedChange,
+                )
+                Spacer(Modifier.width(4.dp))
+            }
             // 方向圆点：支出橙、收入绿
             Box(
                 modifier = Modifier
@@ -649,6 +697,11 @@ private fun PreviewRowCard(row: PreviewRow, currency: String) {
                     row.skipReason?.takeIf { row.kind != PreviewRow.Kind.DUPLICATE }?.let {
                         append(" · ")
                         append(it)
+                    }
+                    reversal?.let {
+                        append(" · 退款 ")
+                        append(Money.of(it.refundAmount.amountMinor, currency).format())
+                        if (it.isPartial) append("（部分）")
                     }
                 }
                 Text(

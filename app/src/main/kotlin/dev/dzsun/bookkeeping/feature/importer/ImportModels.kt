@@ -5,6 +5,7 @@ import dev.dzsun.bookkeeping.core.database.AccountType
 import dev.dzsun.bookkeeping.core.money.Money
 import dev.dzsun.bookkeeping.core.statement.ImportPlan
 import dev.dzsun.bookkeeping.core.statement.PlannedEntry
+import dev.dzsun.bookkeeping.core.statement.PlannedReversal
 import dev.dzsun.bookkeeping.core.statement.RowVerdict
 import dev.dzsun.bookkeeping.core.statement.StatementDirection
 import dev.dzsun.bookkeeping.core.statement.StatementLabeling
@@ -110,7 +111,7 @@ data class PreviewRow(
         /** 有重复候选，**默认不导入**。 */
         DUPLICATE,
 
-        /** 之前导入过、且状态变了（多半是退款），只展示不入库。 */
+        /** 之前导入过、且状态变了（多半是退款）。有可落库的冲减时可勾选，默认不勾。 */
         STATUS_CHANGED,
 
         /** 转账/红包这类资金转移。 */
@@ -163,6 +164,7 @@ fun previewTitle(row: PreviewRow): PreviewTitle {
 
 /** 把计划摊平成预览列表：先待导入，再疑似重复，最后是不入库的其他行。 */
 fun ImportPlan.toPreviewRows(): List<PreviewRow> = buildList {
+    val reversibleRows = reversalsByRow().keys
     for (e in entries) {
         add(e.toPreviewRow(PreviewRow.Kind.IMPORT, skipReason = null))
     }
@@ -188,7 +190,8 @@ fun ImportPlan.toPreviewRows(): List<PreviewRow> = buildList {
                 rawType = row.rawType,
                 categoryName = null,
                 categoryFromHistory = false,
-                skipReason = "状态变化 · 需单独处理",
+                // 有可落库的冲减时不写「需单独处理」——那行现在能办，由勾选框负责表达
+                skipReason = if (row.rowNumber in reversibleRows) null else "状态变化 · 需单独处理",
             ),
         )
     }
@@ -228,6 +231,22 @@ fun ImportPlan.toPreviewRows(): List<PreviewRow> = buildList {
         )
     }
 }
+
+/**
+ * 可落库的退款冲减，按流水行号索引。
+ *
+ * 预览与落库共用这一份索引：两边各算一次的话，用户勾的那一行与实际冲的那一笔
+ * 可能对不上，而那种错不会报错，只会悄悄冲错账。
+ */
+fun ImportPlan.reversalsByRow(): Map<Int, PlannedReversal> =
+    reversals.associateBy { it.row.rowNumber }
+
+/**
+ * 用户在预览里勾选了的冲减。**默认传空集 = 一笔都不冲**，
+ * 行为与勾选入口出现之前完全一致（只新增待导入的账，不动已有账）。
+ */
+fun ImportPlan.selectedReversals(selectedRows: Set<Int>): List<PlannedReversal> =
+    reversals.filter { it.row.rowNumber in selectedRows }
 
 private fun PlannedEntry.toPreviewRow(
     kind: PreviewRow.Kind,

@@ -51,6 +51,12 @@ data class ImportUiState(
     /** 逐条改分类时可选的收支分类。分类是数据，从科目表读，不在代码里写死。 */
     val categories: List<AccountEntity> = emptyList(),
 
+    /**
+     * 用户在预览里勾选了的退款冲减（按流水行号）。**默认空 = 一笔都不冲**，
+     * 保持勾选入口出现之前「只新增、不改动已有账」的行为。
+     */
+    val selectedReversalRows: Set<Int> = emptySet(),
+
     // ---- 陌生商户批量归类（导入完成之后） ----
 
     /** 这次导入里落到兜底分类、用户从没归过类的商户。没有就不提这件事。 */
@@ -142,6 +148,7 @@ class ImportViewModel @Inject constructor(
                 error = null,
                 warnings = emptyList(),
                 stage = ImportStage.SelectFile,
+                selectedReversalRows = emptySet(),
             )
         }
     }
@@ -163,6 +170,8 @@ class ImportViewModel @Inject constructor(
             it.copy(
                 isBusy = true,
                 error = null,
+                // 新一轮解析出来的是一份新计划，上一份的勾选不该带过来
+                selectedReversalRows = emptySet(),
                 stage = if (password == null) ImportStage.SelectFile else ImportStage.NeedPassword(),
             )
         }
@@ -212,16 +221,37 @@ class ImportViewModel @Inject constructor(
         prepare(password = password)
     }
 
-    /** 确认后才落账。只写 [ImportPlan.entries]，重复项一概不动。 */
+    /**
+     * 用户勾/取消一笔退款冲减。**默认不勾**——冲减是负向凭证，
+     * 用户没点头之前一笔都不写，未勾选即维持旧行为。
+     */
+    fun onReversalToggled(rowNumber: Int, checked: Boolean) {
+        _state.update { s ->
+            s.copy(
+                selectedReversalRows = if (checked) {
+                    s.selectedReversalRows + rowNumber
+                } else {
+                    s.selectedReversalRows - rowNumber
+                },
+            )
+        }
+    }
+
+    /**
+     * 确认后才落账。只写 [ImportPlan.entries] 与用户勾选了的冲减，
+     * 重复项与其余状态变化一概不动。
+     */
     fun confirmImport() {
         val stage = _state.value.stage as? ImportStage.Preview ?: return
         if (_state.value.isBusy) return
         // 陌生商户要在**丢掉 plan 之前**算出来：落库之后只剩凭证 id，商户名
         // 得回头去查库，而那时已经分不清哪些是「这次新出现的」
         val unknown = stage.plan.unknownMerchants()
+        // 冲减严格按用户勾选的行号过滤——默认空集，一笔都不冲
+        val reversals = stage.plan.selectedReversals(_state.value.selectedReversalRows)
         _state.update { it.copy(isBusy = true) }
         viewModelScope.launch {
-            val outcome = importer.commit(stage.plan.entries)
+            val outcome = importer.commit(stage.plan.entries, reversals)
             _state.update {
                 it.copy(
                     isBusy = false,
